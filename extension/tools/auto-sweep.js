@@ -948,91 +948,114 @@
       logBox.scrollTop = logBox.scrollHeight;
     };
 
-    let currentQueue = quickQueue.slice();
+    // Outer loop: cycles = (passes + post-sweep full refresh). After each
+    // cycle, we refetch ALL favorited courses and check if any new quick
+    // items appeared anywhere (not just in courses we touched — a sibling
+    // course could have time-released items between cycles too). Keep going
+    // until a full rescan reveals zero quick items, or we hit MAX_CYCLES.
+    const MAX_CYCLES = 8;
+    let cycle = 0;
     let pass = 0;
+    let currentQueue = quickQueue.slice();
+    let stopReason = null;
 
-    while (currentQueue.length && pass < MAX_PASSES) {
-      pass++;
-      log(`── Pass ${pass}: ${currentQueue.length} items ──`, '#79c0ff');
-      let passDone = 0, passFailed = 0;
-      const affectedCourses = new Set();
+    outer: while (currentQueue.length && cycle < MAX_CYCLES) {
+      cycle++;
+      log(`══ Cycle ${cycle}: ${currentQueue.length} quick items in queue ══`, '#a371f7');
 
-      await Promise.all(currentQueue.map(item => cap(async () => {
-        attempted.add(`${item.courseId}-${item.itemId}`);
-        affectedCourses.add(item.courseId);
-        try {
-          await sleep(150 + Math.random() * 250);
-          const path = item.reqType === 'must_view'
-            ? `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/mark_read`
-            : `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/done`;
-          const method = item.reqType === 'must_view' ? 'POST' : 'PUT';
-          const res = await fetch(BASE + path, {
-            method,
-            credentials: 'include',
-            headers: {
-              'X-CSRF-Token': token,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'X-Requested-With': 'XMLHttpRequest',
-            },
-          });
-          if (res.ok) {
-            passDone++; totalDone++;
-            log(`✓ ${item.title.slice(0, 70)}`, '#7ee787');
-            allResults.push({ ...item, ok: true });
-          } else {
+      // Inner: cascade-drain passes within a cycle.
+      let cyclePass = 0;
+      while (currentQueue.length && cyclePass < MAX_PASSES) {
+        cyclePass++; pass++;
+        log(`── Pass ${pass} (cycle ${cycle}, pass ${cyclePass}): ${currentQueue.length} items ──`, '#79c0ff');
+        let passDone = 0, passFailed = 0;
+        const affectedCourses = new Set();
+
+        await Promise.all(currentQueue.map(item => cap(async () => {
+          attempted.add(`${item.courseId}-${item.itemId}`);
+          affectedCourses.add(item.courseId);
+          try {
+            await sleep(150 + Math.random() * 250);
+            const path = item.reqType === 'must_view'
+              ? `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/mark_read`
+              : `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/done`;
+            const method = item.reqType === 'must_view' ? 'POST' : 'PUT';
+            const res = await fetch(BASE + path, {
+              method,
+              credentials: 'include',
+              headers: {
+                'X-CSRF-Token': token,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+              },
+            });
+            if (res.ok) {
+              passDone++; totalDone++;
+              log(`✓ ${item.title.slice(0, 70)}`, '#7ee787');
+              allResults.push({ ...item, ok: true });
+            } else {
+              passFailed++; totalFailed++;
+              log(`✗ ${item.title.slice(0, 70)} (${res.status})`, '#ff6b6b');
+              allResults.push({ ...item, ok: false, status: res.status });
+            }
+          } catch (e) {
             passFailed++; totalFailed++;
-            log(`✗ ${item.title.slice(0, 70)} (${res.status})`, '#ff6b6b');
-            allResults.push({ ...item, ok: false, status: res.status });
+            log(`✗ ${item.title.slice(0, 70)} (${e.message})`, '#ff6b6b');
+            allResults.push({ ...item, ok: false, error: e.message });
           }
-        } catch (e) {
-          passFailed++; totalFailed++;
-          log(`✗ ${item.title.slice(0, 70)} (${e.message})`, '#ff6b6b');
-          allResults.push({ ...item, ok: false, error: e.message });
+          setProg(`Cycle ${cycle} · Pass ${pass} · ${passDone + passFailed} / ${currentQueue.length} · total ${totalDone} ok · ${totalFailed} failed`);
+        })));
+
+        if (passDone === 0 && passFailed === 0) {
+          log(`Pass ${pass} had nothing to do — ending cycle.`, '#8b949e');
+          break;
         }
-        setProg(`Pass ${pass} · ${passDone + passFailed} / ${currentQueue.length} · total ${totalDone} ok · ${totalFailed} failed`);
-      })));
+        if (passDone === 0 && passFailed > 0) {
+          log(`Pass ${pass}: all ${passFailed} attempts failed. Aborting.`, '#ff6b6b');
+          stopReason = 'all-failed';
+          break outer;
+        }
 
-      // Bail logic:
-      // - Nothing done AND nothing failed → no items existed; we're done.
-      // - Nothing done BUT some failed → all writes broke (likely 429/403);
-      //   bail to avoid a retry loop. User can rescan + run again.
-      // - Otherwise → at least one item flipped, so wait for Canvas to
-      //   recompute prereqs and look for newly-revealed quick items.
-      if (passDone === 0 && passFailed === 0) {
-        log(`Pass ${pass} had nothing to do — stopping.`, '#8b949e');
-        break;
-      }
-      if (passDone === 0 && passFailed > 0) {
-        log(`Pass ${pass}: all ${passFailed} attempts failed. Aborting to avoid retry loop.`, '#ff6b6b');
-        break;
+        log(`Waiting for Canvas to recompute prereqs across ${affectedCourses.size} course(s)…`, '#8b949e');
+        currentQueue = await waitForStateChange(affectedCourses, attempted, log);
+        if (!currentQueue.length) log(`No further quick items in this cycle.`, '#7ee787');
       }
 
-      log(`Waiting for Canvas to recompute prereqs across ${affectedCourses.size} course(s)…`, '#8b949e');
-      currentQueue = await waitForStateChange(affectedCourses, attempted, log);
-      if (!currentQueue.length) log(`No further quick items revealed. Cascade done.`, '#7ee787');
+      if (cyclePass >= MAX_PASSES && currentQueue.length) {
+        log(`Cycle ${cycle} hit MAX_PASSES (${MAX_PASSES}). Continuing to next cycle.`, '#ffb84d');
+      }
+
+      // End of cycle: do a FULL refresh across all favorited courses and
+      // check whether any new quick items appeared anywhere. If yes, queue
+      // them and start another cycle. If no, we're truly done.
+      log(`Cycle ${cycle} done. Doing full rescan of all ${courses.length} courses…`, '#8b949e');
+      try {
+        const fresh = await refreshPanelFromCourses(courses.map(c => c.id));
+        const nextQueue = fresh.filter(b => b.quick && !attempted.has(`${b.courseId}-${b.itemId}`));
+        if (!nextQueue.length) {
+          log(`✓ Full rescan found no new quick items. Cascade fully drained.`, '#7ee787');
+          currentQueue = [];
+          stopReason = 'drained';
+          break;
+        }
+        log(`Full rescan revealed ${nextQueue.length} new quick item(s). Starting cycle ${cycle + 1}…`, '#a371f7');
+        currentQueue = nextQueue;
+      } catch (e) {
+        log(`Rescan failed: ${e.message}. Stopping.`, '#ff6b6b');
+        stopReason = 'rescan-failed';
+        break;
+      }
     }
 
-    if (pass >= MAX_PASSES && currentQueue.length) {
-      log(`Hit MAX_PASSES (${MAX_PASSES}) — bailing. Click ↻ Rescan + Run again to continue.`, '#ffb84d');
+    if (cycle >= MAX_CYCLES && currentQueue.length) {
+      log(`Hit MAX_CYCLES (${MAX_CYCLES}). Click ↻ Rescan + Run again if more items appear.`, '#ffb84d');
+      stopReason = stopReason || 'max-cycles';
     }
 
-    setProg(`Done after ${pass} pass${pass === 1 ? '' : 'es'}. ${totalDone} unlocked · ${totalFailed} failed.`);
+    setProg(`Done after ${cycle} cycle${cycle === 1 ? '' : 's'}, ${pass} pass${pass === 1 ? '' : 'es'}. ${totalDone} unlocked · ${totalFailed} failed.`);
     btn.textContent = `✓ Unlocked ${totalDone}`;
     btn.style.background = '#143d2b';
-
-    // Repaint the panel from a fresh fetch of the courses we touched so the
-    // user sees up-to-date state without re-injecting the tool.
-    const touchedIdsList = [...new Set(allResults.map(r => r.courseId))];
-    if (touchedIdsList.length) {
-      log(`Refreshing panel from fresh server state…`, '#8b949e');
-      try {
-        await refreshPanelFromCourses(touchedIdsList);
-        log(`✓ Panel refreshed.`, '#7ee787');
-      } catch (e) {
-        log(`Panel refresh failed: ${e.message}`, '#ff6b6b');
-      }
-    }
 
     // Save sweep result so dashboard can show "recently unlocked" banner
     const unlocked = allResults.filter(r => r.ok).map(r => ({
@@ -1045,7 +1068,7 @@
       localStorage.removeItem('feuDashCache'); // force dashboard refetch
     } catch {}
 
-    console.log(`%c[Sweep] ${pass} passes · ${totalDone} unlocked · ${totalFailed} failed · ${manualList.length} still manual.`, 'color:#7ee787;font-weight:bold');
-    window.FEULastSweep = { unlocked, manual: manualList, passes: pass };
+    console.log(`%c[Sweep] ${cycle} cycles · ${pass} passes · ${totalDone} unlocked · ${totalFailed} failed · ${manualList.length} still manual · stop=${stopReason || 'normal'}.`, 'color:#7ee787;font-weight:bold');
+    window.FEULastSweep = { unlocked, manual: manualList, cycles: cycle, passes: pass, stopReason };
   };
 })();
