@@ -105,14 +105,39 @@
 
     return await Promise.all(courses.map(async (c) => {
       const [assigns, modules] = await Promise.all([
-        api(`/api/v1/courses/${c.id}/assignments?bucket=unsubmitted&order_by=due_at`).catch(() => []),
+        // include[]=submission gives us the CURRENT USER's submission record
+        // (workflow_state, attempt count). Without it we'd be looking at
+        // has_submitted_submissions which is course-wide aggregate state and
+        // returns true the moment any single classmate submits.
+        api(`/api/v1/courses/${c.id}/assignments?bucket=unsubmitted&order_by=due_at&include[]=submission`).catch(() => []),
         api(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`).catch(() => []),
       ]);
 
+      const isUnsubmittedByMe = (a) => {
+        const s = a.submission;
+        if (!s) return true;                                  // no submission record yet
+        if (!s.workflow_state || s.workflow_state === 'unsubmitted') return true;
+        // Edge case: graded but no attempt recorded (instructor placeholder).
+        if (s.workflow_state === 'graded' && (s.attempt ?? 0) === 0) return true;
+        return false;
+      };
+
       const pending = assigns
-        .filter(a => !a.has_submitted_submissions && !a.locked_for_user)
+        .filter(a => !a.locked_for_user)
+        .filter(isUnsubmittedByMe)
         .filter(a => !a.due_at || new Date(a.due_at).getTime() > STALE_CUTOFF)
-        .map(a => ({ id: a.id, name: a.name, due: a.due_at, points: a.points_possible, url: a.html_url }))
+        .map(a => ({
+          id: a.id,
+          name: a.name,
+          due: a.due_at,
+          points: a.points_possible,
+          url: a.html_url,
+          attempts: a.submission?.attempt ?? 0,
+          allowedAttempts: a.allowed_attempts,             // -1 or null = unlimited
+          submissionTypes: a.submission_types || [],
+          allowedExtensions: a.allowed_extensions || [],
+          workflowState: a.submission?.workflow_state || 'unsubmitted',
+        }))
         .sort((x, y) => (new Date(x.due || '9999') - new Date(y.due || '9999')));
 
       const blockers = [];
@@ -188,19 +213,49 @@
     const { course, pending, blockers } = d;
     const now = new Date();
 
+    const fmtSubmissionTypes = (types, exts) => {
+      if (!types.length) return null;
+      const labels = {
+        online_upload: 'file upload', online_text_entry: 'text entry',
+        online_url: 'URL', online_quiz: 'quiz', media_recording: 'media',
+        discussion_topic: 'discussion', external_tool: 'external tool',
+        none: 'no submission', not_graded: 'not graded', on_paper: 'on paper',
+      };
+      const human = types.map(t => labels[t] || t).join(' / ');
+      if (types.includes('online_upload') && exts.length) return `${human} (${exts.join(', ')})`;
+      return human;
+    };
+
     const pendingHtml = pending.map(p => {
       const isOverdue = p.due && new Date(p.due) < now;
       const accent = isOverdue ? '#ff6b6b' : '#7ee787';
       const cat = categorize({ name: p.name, itemType: 'Assignment', points: p.points });
+
+      // Status pill — "Not Started" vs "In Progress" (drafted but not submitted)
+      const inProgress = p.attempts > 0 && p.workflowState !== 'submitted' && p.workflowState !== 'graded';
+      const pillColor = inProgress ? '#ffb84d' : '#8b949e';
+      const pillLabel = inProgress ? 'In Progress' : 'Not Started';
+
+      const attemptsLabel = (p.allowedAttempts == null || p.allowedAttempts === -1)
+        ? `${p.attempts}/∞ attempts`
+        : `${p.attempts}/${p.allowedAttempts} attempts`;
+
+      const subType = fmtSubmissionTypes(p.submissionTypes, p.allowedExtensions);
+
       return `
         <div style="border-left:3px solid ${accent};padding:6px 10px;margin:4px 0;background:#161b22;border-radius:0 6px 6px 0;">
           <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start;">
             <a href="${p.url}" target="_blank" style="color:#79c0ff;text-decoration:none;font-weight:600;font-size:12px;flex:1;">${p.name || '(untitled)'}</a>
             ${chip(cat)}
           </div>
-          <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;opacity:.8;">
+          <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;opacity:.85;gap:6px;">
             <span>${fmt(p.due)}</span>
             <span>${p.points ?? 0} pts</span>
+          </div>
+          <div style="font-size:10.5px;margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;opacity:.85;">
+            <span style="background:${pillColor}22;color:${pillColor};border:1px solid ${pillColor}55;padding:1px 6px;border-radius:4px;font-weight:600;">${pillLabel}</span>
+            <span style="opacity:.75;">${attemptsLabel}</span>
+            ${subType ? `<span style="opacity:.75;">· ${subType}</span>` : ''}
           </div>
         </div>`;
     }).join('');
