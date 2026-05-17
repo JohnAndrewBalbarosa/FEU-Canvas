@@ -731,8 +731,48 @@
     btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn); };
   });
 
-  // ---------- 5. Run sweep ----------
+  // ---------- 5. Run sweep (sequential, multi-pass) ----------
+  // Canvas's prereq chain only reveals downstream quick items AFTER upstream
+  // ones complete. So one pass isn't enough — we rescan affected courses
+  // between passes and keep going until no new quick items appear (or we hit
+  // MAX_PASSES as a safety stop).
   if (!quickQueue.length) return;
+
+  const MAX_PASSES = 6;
+  const courseById = new Map(courses.map(c => [c.id, c]));
+
+  const rescanQuickQueue = async (courseIds, seenItemIds) => {
+    const scans = await Promise.all([...courseIds].map(id =>
+      apiList(`/api/v1/courses/${id}/modules?include[]=items&include[]=content_details`)
+        .catch(() => [])
+        .then(modules => ({ id, modules }))
+    ));
+    const fresh = [];
+    for (const { id, modules } of scans) {
+      const course = courseById.get(id);
+      if (!course) continue;
+      for (const mod of modules) {
+        if (mod.state === 'completed') continue;
+        const moduleLocked = mod.state === 'locked';
+        for (const item of (mod.items || [])) {
+          const req = item.completion_requirement;
+          if (!req || req.completed) continue;
+          if (!QUICK_TYPES.has(req.type)) continue;
+          if (moduleLocked) continue; // can't unlock — module-level prereq still blocking
+          if (seenItemIds.has(`${id}-${item.id}`)) continue;
+          const points = item.content_details?.points_possible ?? null;
+          const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
+          fresh.push({
+            courseId: id, courseName: course.name,
+            moduleId: mod.id, moduleName: mod.name,
+            itemId: item.id, title: item.title, itemType: item.type,
+            reqType: req.type, url: item.html_url, points, cat,
+          });
+        }
+      }
+    }
+    return fresh;
+  };
 
   panel.querySelector('#sw-run').onclick = async () => {
     const btn = panel.querySelector('#sw-run');
@@ -740,11 +780,12 @@
     btn.style.background = '#30363d'; btn.style.cursor = 'not-allowed';
 
     const token = csrf();
-    const results = [];
-    let done = 0, failed = 0;
+    const allResults = [];
+    let totalDone = 0, totalFailed = 0;
+    const attempted = new Set(); // `${courseId}-${itemId}` we've tried, to avoid loops
 
     const logBox = document.createElement('div');
-    logBox.style.cssText = 'margin-top:10px;font-size:11px;font-family:ui-monospace,monospace;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;max-height:240px;overflow:auto;';
+    logBox.style.cssText = 'margin-top:10px;font-size:11px;font-family:ui-monospace,monospace;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;max-height:300px;overflow:auto;';
     logBox.innerHTML = '<div id="sw-prog" style="font-weight:600;">Starting…</div><div id="sw-log"></div>';
     panel.appendChild(logBox);
     const setProg = (t) => { logBox.querySelector('#sw-prog').textContent = t; };
@@ -755,46 +796,75 @@
       logBox.scrollTop = logBox.scrollHeight;
     };
 
-    await Promise.all(quickQueue.map(item => cap(async () => {
-      try {
-        await sleep(200 + Math.random() * 300); // stagger to avoid burst throttling
-        const path = item.reqType === 'must_view'
-          ? `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/mark_read`
-          : `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/done`;
-        const method = item.reqType === 'must_view' ? 'POST' : 'PUT';
-        const res = await fetch(BASE + path, {
-          method,
-          credentials: 'include',
-          headers: {
-            'X-CSRF-Token': token,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-        });
-        if (res.ok) {
-          done++;
-          log(`✓ ${item.title.slice(0, 70)}`, '#7ee787');
-          results.push({ ...item, ok: true });
-        } else {
-          failed++;
-          log(`✗ ${item.title.slice(0, 70)} (${res.status})`, '#ff6b6b');
-          results.push({ ...item, ok: false, status: res.status });
-        }
-      } catch (e) {
-        failed++;
-        log(`✗ ${item.title.slice(0, 70)} (${e.message})`, '#ff6b6b');
-        results.push({ ...item, ok: false, error: e.message });
-      }
-      setProg(`${done + failed} / ${quickQueue.length} · ${done} ok · ${failed} failed`);
-    })));
+    let currentQueue = quickQueue.slice();
+    let pass = 0;
 
-    setProg(`Sweep done. ${done} unlocked · ${failed} failed.`);
-    btn.textContent = `✓ Unlocked ${done}`;
+    while (currentQueue.length && pass < MAX_PASSES) {
+      pass++;
+      log(`── Pass ${pass}: ${currentQueue.length} items ──`, '#79c0ff');
+      let passDone = 0, passFailed = 0;
+      const affectedCourses = new Set();
+
+      await Promise.all(currentQueue.map(item => cap(async () => {
+        attempted.add(`${item.courseId}-${item.itemId}`);
+        affectedCourses.add(item.courseId);
+        try {
+          await sleep(150 + Math.random() * 250);
+          const path = item.reqType === 'must_view'
+            ? `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/mark_read`
+            : `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/done`;
+          const method = item.reqType === 'must_view' ? 'POST' : 'PUT';
+          const res = await fetch(BASE + path, {
+            method,
+            credentials: 'include',
+            headers: {
+              'X-CSRF-Token': token,
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          });
+          if (res.ok) {
+            passDone++; totalDone++;
+            log(`✓ ${item.title.slice(0, 70)}`, '#7ee787');
+            allResults.push({ ...item, ok: true });
+          } else {
+            passFailed++; totalFailed++;
+            log(`✗ ${item.title.slice(0, 70)} (${res.status})`, '#ff6b6b');
+            allResults.push({ ...item, ok: false, status: res.status });
+          }
+        } catch (e) {
+          passFailed++; totalFailed++;
+          log(`✗ ${item.title.slice(0, 70)} (${e.message})`, '#ff6b6b');
+          allResults.push({ ...item, ok: false, error: e.message });
+        }
+        setProg(`Pass ${pass} · ${passDone + passFailed} / ${currentQueue.length} · total ${totalDone} ok · ${totalFailed} failed`);
+      })));
+
+      // Nothing was unlocked this pass → next pass can't reveal anything new.
+      if (passDone === 0) {
+        log(`Pass ${pass} unlocked nothing — stopping.`, '#8b949e');
+        break;
+      }
+
+      // Give Canvas a beat to recompute prereqs, then rescan only the courses
+      // we just touched.
+      log(`Rescanning ${affectedCourses.size} affected course(s) for newly-revealed items…`, '#8b949e');
+      await sleep(800);
+      currentQueue = await rescanQuickQueue(affectedCourses, attempted);
+      if (!currentQueue.length) log(`No new quick items revealed. Done.`, '#7ee787');
+    }
+
+    if (pass >= MAX_PASSES && currentQueue.length) {
+      log(`Hit MAX_PASSES (${MAX_PASSES}) — bailing. Reopen Auto-Sweep to continue.`, '#ffb84d');
+    }
+
+    setProg(`Done after ${pass} pass${pass === 1 ? '' : 'es'}. ${totalDone} unlocked · ${totalFailed} failed.`);
+    btn.textContent = `✓ Unlocked ${totalDone}`;
     btn.style.background = '#143d2b';
 
     // Save sweep result so dashboard can show "recently unlocked" banner
-    const unlocked = results.filter(r => r.ok).map(r => ({
+    const unlocked = allResults.filter(r => r.ok).map(r => ({
       title: r.title, courseName: r.courseName, moduleName: r.moduleName,
       url: r.url, cat: { label: r.cat.label, color: r.cat.color, key: r.cat.key },
       reqType: r.reqType, itemType: r.itemType,
@@ -804,7 +874,7 @@
       localStorage.removeItem('feuDashCache'); // force dashboard refetch
     } catch {}
 
-    console.log(`%c[Sweep] Unlocked ${done}, ${manualList.length} still need manual handling.`, 'color:#7ee787;font-weight:bold');
-    window.FEULastSweep = { unlocked, manual: manualList };
+    console.log(`%c[Sweep] ${pass} passes · ${totalDone} unlocked · ${totalFailed} failed · ${manualList.length} still manual.`, 'color:#7ee787;font-weight:bold');
+    window.FEULastSweep = { unlocked, manual: manualList, passes: pass };
   };
 })();
