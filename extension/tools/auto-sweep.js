@@ -1149,8 +1149,131 @@
       stopReason = stopReason || 'max-cycles';
     }
 
-    setProg(`Done after ${cycle} cycle${cycle === 1 ? '' : 's'}, ${pass} pass${pass === 1 ? '' : 'es'}. ${totalDone} unlocked · ${totalFailed} failed.`);
-    btn.textContent = `✓ Unlocked ${totalDone}`;
+    // ---------- Headless Autonext phase ----------
+    // The bulk sweep above only touches items with a formal must_view /
+    // must_mark_done completion_requirement. Many Canvas items don't have
+    // one but Canvas still tracks them as "viewed" via mark_read. Walking
+    // each unlocked module sequentially via the module_item_sequence API
+    // catches those too AND surfaces the first heavy blocker per course
+    // (quiz / discussion / submission / locked-next-module) as a precise
+    // "you got stuck here" pinpoint.
+    log(`── Headless Autonext: walking each course's sequence ──`, '#a371f7');
+    const HEAVY = new Set(['must_submit', 'min_score', 'must_contribute']);
+    let anWalked = 0, anMarked = 0, anStops = [];
+
+    const walkOneCourse = async (course) => {
+      // Find a starting point: first item in an unlocked, incomplete module
+      // that has either no requirement or a quick requirement we can act on.
+      let mods;
+      try {
+        mods = await apiListFresh(`/api/v1/courses/${course.id}/modules?include[]=items&include[]=content_details`);
+      } catch { return; }
+
+      let startItem = null, startModuleId = null;
+      for (const mod of mods) {
+        if (mod.state === 'completed' || mod.state === 'locked') continue;
+        for (const item of (mod.items || [])) {
+          // Skip items that are already complete OR are heavy (we'll stop there
+          // when we reach them via the walk).
+          if (item.completion_requirement?.completed) continue;
+          startItem = item; startModuleId = mod.id;
+          break;
+        }
+        if (startItem) break;
+      }
+      if (!startItem) {
+        log(`  ${course.name}: nothing to walk (already complete or all heavy).`, '#8b949e');
+        return;
+      }
+
+      let current = { ...startItem, module_id: startModuleId };
+      const MAX = 150;
+      let walked = 0, marked = 0, stop = null;
+      for (let step = 0; step < MAX && current; step++) {
+        walked++; anWalked++;
+        const req = current.completion_requirement;
+
+        // Heavy → stop, surface it.
+        if (req && HEAVY.has(req.type) && !req.completed) {
+          stop = { reason: req.type, title: current.title, url: current.html_url };
+          break;
+        }
+
+        // Mark viewable items as read. Canvas tolerates this even for items
+        // without a formal must_view req — it just updates the "viewed" flag.
+        if (!req || req.type === 'must_view' || (req.type === 'must_mark_done' && !req.completed)) {
+          try {
+            const path = req?.type === 'must_mark_done'
+              ? `/api/v1/courses/${course.id}/modules/${current.module_id}/items/${current.id}/done`
+              : `/api/v1/courses/${course.id}/modules/${current.module_id}/items/${current.id}/mark_read`;
+            const method = req?.type === 'must_mark_done' ? 'PUT' : 'POST';
+            const res = await fetch(BASE + path, {
+              method,
+              credentials: 'include',
+              headers: {
+                'X-CSRF-Token': csrf(),
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+              },
+            });
+            if (res.ok) { marked++; anMarked++; }
+          } catch {}
+        }
+
+        // Next item via sequence API.
+        let next = null;
+        try {
+          const seq = await apiListFresh(`/api/v1/courses/${course.id}/module_item_sequence?asset_type=ModuleItem&asset_id=${current.id}`);
+          const seqItem = seq?.[0];
+          const nxt = seqItem?.items?.[0]?.next;
+          if (nxt) {
+            // Hydrate the full item record.
+            const full = await fetch(`${BASE}/api/v1/courses/${course.id}/modules/${nxt.module_id}/items/${nxt.id}`, {
+              credentials: 'include', cache: 'no-store',
+              headers: { Accept: 'application/json' },
+            }).then(r => r.ok ? r.json() : null).catch(() => null);
+            if (full) next = { ...full, module_id: nxt.module_id };
+          }
+        } catch {}
+
+        if (!next) { stop = { reason: 'end-of-sequence' }; break; }
+        // If the next item is in a module that's still locked, stop.
+        if (next.module_id !== current.module_id) {
+          const lockedMod = mods.find(m => m.id === next.module_id);
+          if (lockedMod?.state === 'locked') {
+            stop = { reason: 'next-module-locked', title: next.title, url: next.html_url };
+            break;
+          }
+        }
+        current = next;
+        await sleep(150); // throttle
+      }
+      if (!stop && walked >= MAX) stop = { reason: 'max-steps' };
+
+      const reasonLabel = stop?.reason === 'must_submit'    ? '⏸ stops at submission'
+                       : stop?.reason === 'min_score'       ? '⏸ stops at quiz'
+                       : stop?.reason === 'must_contribute' ? '⏸ stops at discussion'
+                       : stop?.reason === 'next-module-locked' ? '🔒 next module locked'
+                       : stop?.reason === 'end-of-sequence' ? '✓ end of sequence'
+                       : stop?.reason === 'max-steps'       ? '⚠ hit max steps'
+                       : 'done';
+      log(`  ${course.name}: walked ${walked}, marked ${marked}, ${reasonLabel}${stop?.title ? ` (${stop.title.slice(0, 50)})` : ''}`, stop?.reason?.startsWith('must') ? '#ffb84d' : '#7ee787');
+      if (stop?.title && stop?.url) anStops.push({ course: course.name, ...stop });
+    };
+
+    // Walk all favorited courses in parallel (each is a separate Canvas
+    // sequence, no contention between them).
+    await Promise.all(courses.map(walkOneCourse));
+    log(`Autonext done: walked ${anWalked} items, marked ${anMarked}, ${anStops.length} courses stopped at heavy blockers.`, '#a371f7');
+
+    // Final UI refresh to reflect any newly-marked items.
+    try {
+      await refreshPanelFromCourses(courses.map(c => c.id));
+    } catch {}
+
+    setProg(`Done after ${cycle} cycle${cycle === 1 ? '' : 's'}, ${pass} pass${pass === 1 ? '' : 'es'} + autonext. ${totalDone + anMarked} unlocked · ${totalFailed} failed.`);
+    btn.textContent = `✓ Unlocked ${totalDone + anMarked}`;
     btn.style.background = '#143d2b';
 
     // Save sweep result so dashboard can show "recently unlocked" banner
