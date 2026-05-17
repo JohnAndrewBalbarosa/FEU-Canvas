@@ -3,8 +3,16 @@
 // Currently used by the Pending Dashboard to fire up Auto-Sweep without
 // requiring the user to round-trip through the popup.
 
+// Keep in sync with popup.js FILE_MAP — array values inject in order.
 const INJECTABLE = {
-  'auto-sweep': 'tools/auto-sweep.js',
+  'auto-sweep': [
+    'tools/sweep/canvas-api.js',
+    'tools/sweep/policy.js',
+    'tools/sweep/ai-client.js',
+    'tools/sweep/engine.js',
+    'tools/sweep/ui.js',
+    'tools/auto-sweep.js',
+  ],
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -16,14 +24,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'inject') {
-    const file = INJECTABLE[msg.tool];
-    if (!file) {
+    const entry = INJECTABLE[msg.tool];
+    if (!entry) {
       sendResponse({ ok: false, error: `unknown tool: ${msg.tool}` });
       return;
     }
+    const files = Array.isArray(entry) ? entry : [entry];
     chrome.scripting.executeScript({
       target: { tabId },
-      files: [file],
+      files,
       world: 'MAIN',
     }).then(
       () => sendResponse({ ok: true }),
