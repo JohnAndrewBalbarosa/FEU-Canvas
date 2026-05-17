@@ -252,7 +252,8 @@
       for (const item of (mod.items || [])) {
         const req = item.completion_requirement;
         if (!req || req.completed) continue;
-        const points = item.content_details?.points_possible ?? null;
+        const cd = item.content_details || {};
+        const points = cd.points_possible ?? null;
         const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
         blockers.push({
           courseId: course.id, courseName: course.name,
@@ -264,6 +265,11 @@
           contentId: item.content_id ?? null, // for discussions = topic_id
           reqType: req.type, url: item.html_url, points, cat,
           quick: QUICK_TYPES.has(req.type) && !moduleLocked,
+          // Context for prioritization (extracted from include[]=content_details):
+          dueAt: cd.due_at || null,
+          unlockAt: cd.unlock_at || null,
+          lockAt: cd.lock_at || null,
+          lockedForUser: cd.locked_for_user || false,
         });
       }
     }
@@ -292,10 +298,31 @@
   for (const b of blockers) (byCategory[b.cat.key] ??= { cat: b.cat, items: [] }).items.push(b);
 
   // ---------- 4. Render preview ----------
+  // Format a due_at ISO string as a small humanized chip.
+  // Returns { text, color, sortKey } where sortKey is ms-from-epoch for sort
+  // (or Number.MAX_SAFE_INTEGER if no due date — those go last).
+  const formatDue = (iso) => {
+    if (!iso) return { text: 'no due date', color: '#8b949e', sortKey: Number.MAX_SAFE_INTEGER };
+    const d = new Date(iso), now = new Date(), ms = d - now;
+    const days = Math.round(ms / 86400000);
+    const dateStr = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    if (ms < 0) return { text: `${dateStr} · ${Math.abs(days)}d OVERDUE`, color: '#ff6b6b', sortKey: d.getTime() };
+    if (days === 0) return { text: `${dateStr} · TODAY`, color: '#ff6b6b', sortKey: d.getTime() };
+    if (days === 1) return { text: `${dateStr} · tomorrow`, color: '#ffb84d', sortKey: d.getTime() };
+    if (days <= 7) return { text: `${dateStr} · in ${days}d`, color: '#ffb84d', sortKey: d.getTime() };
+    return { text: `${dateStr} · in ${days}d`, color: '#7ee787', sortKey: d.getTime() };
+  };
+
+  // Lazy-fetched full assignment cache (filled when user clicks ⓘ on heavy items).
+  const assignmentDetailCache = new Map(); // `${courseId}-${assignmentId}` → assignment
+
   const renderItem = (b) => {
     const isReplyable = (b.reqType === 'must_contribute' || b.itemType === 'Discussion') && b.contentId && !b.moduleLocked;
+    const isAssignmentLike = b.itemType === 'Assignment' || b.itemType === 'Quiz';
+    const showDetails = isAssignmentLike && b.contentId && !b.quick;
     const badge = itemBadge(b);
     const itemKey = `${b.courseId}-${b.itemId}`;
+    const due = formatDue(b.dueAt);
     return `
     <div id="sw-item-${itemKey}" style="border-left:3px solid ${b.cat.color};padding:5px 10px;margin:3px 0;background:#161b22;border-radius:0 6px 6px 0;${b.moduleLocked ? 'opacity:.65;' : ''}">
       <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start;">
@@ -305,13 +332,18 @@
         </span>
         ${chip(b.cat)}
       </div>
-      <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;align-items:center;opacity:.85;">
-        <span>${b.courseName} · ${b.moduleName}</span>
-        <span style="display:flex;gap:6px;align-items:center;">
-          ${isReplyable ? `<button class="sw-reply-toggle" data-key="${itemKey}" data-course-id="${b.courseId}" data-topic-id="${b.contentId}" data-title="${b.title.replace(/"/g, '&quot;')}" style="background:#1f6feb;color:white;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">💬 Reply ↓</button>` : ''}
-          <span style="color:${badge.color};">${TYPE_LABEL[b.reqType] || b.reqType}${b.points ? ` · ${b.points} pts` : ''}</span>
-        </span>
+      <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;align-items:center;opacity:.9;gap:6px;">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${b.courseName} · ${b.moduleName}</span>
+        <span style="color:${due.color};font-weight:${b.dueAt && due.color !== '#7ee787' ? '600' : '400'};white-space:nowrap;">${due.text}</span>
       </div>
+      <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;align-items:center;opacity:.85;">
+        <span style="display:flex;gap:6px;align-items:center;">
+          ${showDetails ? `<button class="sw-details-toggle" data-key="${itemKey}" data-course-id="${b.courseId}" data-assignment-id="${b.contentId}" style="background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:1px 6px;cursor:pointer;font-size:10px;">ⓘ details</button>` : ''}
+          ${isReplyable ? `<button class="sw-reply-toggle" data-key="${itemKey}" data-course-id="${b.courseId}" data-topic-id="${b.contentId}" data-title="${b.title.replace(/"/g, '&quot;')}" style="background:#1f6feb;color:white;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">💬 Reply ↓</button>` : ''}
+        </span>
+        <span style="color:${badge.color};">${TYPE_LABEL[b.reqType] || b.reqType}${b.points != null ? ` · ${b.points} pts` : ''}</span>
+      </div>
+      ${showDetails ? `<div class="sw-details-panel" data-key="${itemKey}" style="display:none;margin-top:6px;padding:8px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:11px;line-height:1.5;"></div>` : ''}
       ${isReplyable ? `<div class="sw-reply-panel" data-key="${itemKey}" style="display:none;margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;"></div>` : ''}
     </div>`;
   };
@@ -350,7 +382,16 @@
             <span style="float:right;font-size:11px;font-weight:400;opacity:.7;">${totalItems} blockers · ${quickInCourse} quick</span>
           </summary>
           ${mods.map(m => {
-            m.items.sort((a, b) => a.itemPosition - b.itemPosition);
+            // Sort: heavy items (need-you) before quick (auto-unlockable),
+            // then by due-date urgency (sooner first; no-due last),
+            // finally by Canvas module position for stable order.
+            m.items.sort((a, b) => {
+              if (a.quick !== b.quick) return a.quick ? 1 : -1;
+              const aDue = formatDue(a.dueAt).sortKey;
+              const bDue = formatDue(b.dueAt).sortKey;
+              if (aDue !== bDue) return aDue - bDue;
+              return a.itemPosition - b.itemPosition;
+            });
             return `
               <details style="margin-top:6px;margin-left:6px;background:#161b22;border-left:2px solid #30363d;padding:6px 10px;border-radius:0 6px 6px 0;">
                 <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#8b949e;list-style:none;">
@@ -376,7 +417,8 @@
       for (const item of (mod.items || [])) {
         const req = item.completion_requirement;
         if (!req || req.completed) continue;
-        const points = item.content_details?.points_possible ?? null;
+        const cd = item.content_details || {};
+        const points = cd.points_possible ?? null;
         const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
         out.push({
           courseId: course.id, courseName: course.name,
@@ -388,6 +430,10 @@
           contentId: item.content_id ?? null,
           reqType: req.type, url: item.html_url, points, cat,
           quick: QUICK_TYPES.has(req.type) && !moduleLocked,
+          dueAt: cd.due_at || null,
+          unlockAt: cd.unlock_at || null,
+          lockAt: cd.lock_at || null,
+          lockedForUser: cd.locked_for_user || false,
         });
       }
     }
@@ -434,6 +480,9 @@
     // Re-wire reply buttons inside the freshly-rendered blockers list.
     panel.querySelectorAll('#sw-blockers .sw-reply-toggle').forEach(btn => {
       btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn); };
+    });
+    panel.querySelectorAll('#sw-blockers .sw-details-toggle').forEach(btn => {
+      btn.onclick = (e) => { e.preventDefault(); openDetailsPanel(btn); };
     });
     return fresh;
   };
@@ -834,6 +883,78 @@
   panel.querySelectorAll('.sw-reply-toggle').forEach(btn => {
     btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn); };
   });
+
+  // ----- Lazy assignment details -----
+  // Fetches /api/v1/courses/:cid/assignments/:aid only when the user clicks ⓘ
+  // so we don't pay N round-trips on every scan. Cached per session.
+  const openDetailsPanel = async (toggleBtn) => {
+    const key = toggleBtn.dataset.key;
+    const courseId = toggleBtn.dataset.courseId;
+    const assignmentId = toggleBtn.dataset.assignmentId;
+    const panelEl = document.querySelector(`.sw-details-panel[data-key="${key}"]`);
+    if (!panelEl) return;
+    if (panelEl.style.display !== 'none') {
+      panelEl.style.display = 'none';
+      toggleBtn.textContent = 'ⓘ details';
+      return;
+    }
+    toggleBtn.textContent = 'ⓘ hide';
+    panelEl.style.display = 'block';
+    panelEl.innerHTML = '<div style="opacity:.7;">Loading assignment details…</div>';
+
+    const cacheKey = `${courseId}-${assignmentId}`;
+    let a = assignmentDetailCache.get(cacheKey);
+    if (!a) {
+      try {
+        const res = await fetch(`${BASE}/api/v1/courses/${courseId}/assignments/${assignmentId}`, {
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) throw new Error(`${res.status}`);
+        a = await res.json();
+        assignmentDetailCache.set(cacheKey, a);
+      } catch (e) {
+        panelEl.innerHTML = `<div style="color:#ff6b6b;">Failed to load: ${e.message}</div>`;
+        return;
+      }
+    }
+
+    const due = formatDue(a.due_at);
+    const lockInfo = a.lock_at ? `<div><span style="opacity:.6;">Locks at:</span> ${new Date(a.lock_at).toLocaleString()}</div>` : '';
+    const unlockInfo = a.unlock_at && new Date(a.unlock_at) > new Date() ? `<div><span style="opacity:.6;">Unlocks at:</span> ${new Date(a.unlock_at).toLocaleString()}</div>` : '';
+    const submissionTypes = (a.submission_types || []).join(', ') || '—';
+    const fileTypes = a.allowed_extensions?.length ? a.allowed_extensions.join(', ') : '—';
+    const attempts = a.allowed_attempts === -1 || a.allowed_attempts == null ? 'Unlimited' : a.allowed_attempts;
+    const usedAttempts = a.submission?.attempt ?? 0;
+    const hasSubmission = a.has_submitted_submissions || (a.submission && a.submission.workflow_state && a.submission.workflow_state !== 'unsubmitted');
+    const workflow = a.submission?.workflow_state || '—';
+    const grade = a.submission?.grade || a.submission?.score;
+    const score = a.submission?.score != null ? `${a.submission.score} / ${a.points_possible ?? '?'}` : null;
+
+    panelEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:max-content 1fr;gap:3px 10px;">
+        <span style="opacity:.6;">Due:</span><span style="color:${due.color};font-weight:600;">${due.text}</span>
+        <span style="opacity:.6;">Points:</span><span>${a.points_possible ?? '—'}</span>
+        <span style="opacity:.6;">Submission:</span><span>${submissionTypes}</span>
+        ${a.allowed_extensions?.length ? `<span style="opacity:.6;">File types:</span><span>${fileTypes}</span>` : ''}
+        <span style="opacity:.6;">Attempts:</span><span>${usedAttempts} / ${attempts}</span>
+        <span style="opacity:.6;">Status:</span><span style="color:${hasSubmission ? '#7ee787' : '#ffb84d'};">${hasSubmission ? `submitted (${workflow})` : 'not submitted'}</span>
+        ${score ? `<span style="opacity:.6;">Score:</span><span>${score}${grade && grade !== score.split(' ')[0] ? ` (${grade})` : ''}</span>` : ''}
+      </div>
+      ${unlockInfo}${lockInfo}
+      <div style="margin-top:6px;display:flex;gap:6px;">
+        <a href="${a.html_url}" target="_blank" style="color:#79c0ff;text-decoration:none;font-size:11px;">Open assignment →</a>
+        ${hasSubmission && a.submission?.preview_url ? `<a href="${a.submission.preview_url}" target="_blank" style="color:#79c0ff;text-decoration:none;font-size:11px;">View submission →</a>` : ''}
+      </div>
+    `;
+  };
+  const wireDetailsButtons = (root = panel) => {
+    root.querySelectorAll('.sw-details-toggle').forEach(btn => {
+      btn.onclick = (e) => { e.preventDefault(); openDetailsPanel(btn); };
+    });
+  };
+  wireDetailsButtons();
 
   // ---------- 5. Run sweep (sequential, multi-pass) ----------
   // Canvas's prereq chain only reveals downstream quick items AFTER upstream
