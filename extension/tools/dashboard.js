@@ -187,7 +187,8 @@
   const renderModal = (d) => {
     const { course, pending, blockers } = d;
     const now = new Date();
-    const firstBlocker = blockers.find(b => b.quick) || blockers[0];
+    const firstQuick = blockers.find(b => b.quick);
+    const firstBlocker = firstQuick || blockers[0];
 
     const pendingHtml = pending.map(p => {
       const isOverdue = p.due && new Date(p.due) < now;
@@ -239,7 +240,13 @@
     return `
       <button id="feu-back" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;margin-bottom:10px;">← All courses</button>
       <div style="font-weight:700;font-size:15px;margin-bottom:8px;">${course.name}</div>
-      ${firstBlocker ? `<button id="feu-jump" data-url="${firstBlocker.url}" style="display:block;width:100%;background:#1f6feb;color:white;border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:12px;">→ Jump to next blocker</button>` : ''}
+      ${blockers.length ? `
+        <div style="display:flex;gap:6px;margin-bottom:12px;">
+          <button id="feu-sweep" style="flex:1;background:#1f6feb;color:white;border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:12px;font-weight:600;">🪄 Auto-Sweep</button>
+          <button id="feu-autonext" ${firstBlocker ? `data-url="${firstBlocker.url}"` : 'disabled'} style="flex:1;background:${firstBlocker ? '#a371f7' : '#30363d'};color:white;border:none;border-radius:6px;padding:7px;cursor:${firstBlocker ? 'pointer' : 'not-allowed'};font-size:12px;font-weight:600;">⏭ Autonext</button>
+        </div>
+        <div id="feu-action-status" style="font-size:10.5px;opacity:.7;margin:-6px 0 10px;min-height:13px;"></div>
+      ` : ''}
       ${pending.length ? `
         <details style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#7ee787;list-style:none;">
@@ -403,8 +410,60 @@
       modal.innerHTML = '';
       bento.style.display = 'grid';
     };
-    const jump = panel.querySelector('#feu-jump');
-    if (jump) jump.onclick = () => { location.href = jump.dataset.url; };
+
+    const setActionStatus = (text, color) => {
+      const el = panel.querySelector('#feu-action-status');
+      if (!el) return;
+      el.textContent = text || '';
+      if (color) el.style.color = color;
+    };
+
+    const sweepBtn = panel.querySelector('#feu-sweep');
+    if (sweepBtn) {
+      sweepBtn.onclick = () => {
+        sweepBtn.disabled = true;
+        sweepBtn.textContent = '🪄 launching…';
+        setActionStatus('Asking the extension to inject Auto-Sweep…', '#8b949e');
+        const handler = (ev) => {
+          if (ev.source !== window) return;
+          const data = ev.data;
+          if (!data || data.source !== 'feu' || data.kind !== 'inject-result' || data.tool !== 'auto-sweep') return;
+          window.removeEventListener('message', handler);
+          if (data.ok) {
+            setActionStatus('✓ Auto-Sweep panel opened. (You can close this dashboard.)', '#7ee787');
+            sweepBtn.textContent = '✓ launched';
+          } else {
+            setActionStatus(`Failed: ${data.error || 'unknown'}. Try the popup button instead.`, '#ff6b6b');
+            sweepBtn.disabled = false;
+            sweepBtn.textContent = '🪄 Auto-Sweep';
+          }
+        };
+        window.addEventListener('message', handler);
+        window.postMessage({ source: 'feu', action: 'inject', tool: 'auto-sweep' }, '*');
+        // Safety: if no reply in 3s, restore the button.
+        setTimeout(() => {
+          if (sweepBtn.disabled && sweepBtn.textContent === '🪄 launching…') {
+            window.removeEventListener('message', handler);
+            setActionStatus('No reply from bridge. Reload the extension at chrome://extensions.', '#ff6b6b');
+            sweepBtn.disabled = false;
+            sweepBtn.textContent = '🪄 Auto-Sweep';
+          }
+        }, 3000);
+      };
+    }
+
+    const anBtn = panel.querySelector('#feu-autonext');
+    if (anBtn && !anBtn.disabled) {
+      anBtn.onclick = () => {
+        const url = anBtn.dataset.url;
+        if (!url) return;
+        sessionStorage.setItem('feuAutonext', '1');
+        setActionStatus('Autonext armed. Navigating to first blocker — runner will take over.', '#a371f7');
+        anBtn.textContent = '⏭ navigating…';
+        anBtn.disabled = true;
+        setTimeout(() => { location.href = url; }, 250);
+      };
+    }
   };
 
   // ---------- bootstrap ----------
