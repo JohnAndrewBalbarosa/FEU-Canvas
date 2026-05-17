@@ -1,7 +1,6 @@
 const FILE_MAP = {
   dashboard: 'tools/dashboard.js',
   sweep: 'tools/auto-sweep.js',
-  autonext: 'tools/autonext.js',
 };
 
 const status = document.getElementById('status');

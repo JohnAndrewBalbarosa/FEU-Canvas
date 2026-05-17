@@ -402,6 +402,9 @@
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
       <strong style="font-size:15px;">🪄 Auto-Sweep</strong>
       <div style="display:flex;gap:4px;">
+        <button id="sw-autonext" title="Headless autonext — auto-clicks Next across pages, stops at quizzes/discussions/submissions/locked modules" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">
+          ⏭ Autonext <span id="sw-an-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${sessionStorage.getItem('feuAutonext') === '1' ? '#7ee787' : '#8b949e'};margin-left:2px;"></span>
+        </button>
         <button id="sw-ai-settings" title="AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">
           ⚙️ AI <span id="sw-ai-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${AI.isConfigured() ? '#7ee787' : '#8b949e'};margin-left:2px;"></span>
         </button>
@@ -468,6 +471,28 @@
 
   panel.querySelector('#sw-close').onclick = () => panel.remove();
   panel.querySelector('#sw-skip').onclick = () => panel.remove();
+
+  // ----- Headless autonext toggle -----
+  const anBtn = panel.querySelector('#sw-autonext');
+  const anDot = panel.querySelector('#sw-an-dot');
+  const refreshAnDot = () => {
+    anDot.style.background = sessionStorage.getItem('feuAutonext') === '1' ? '#7ee787' : '#8b949e';
+  };
+  anBtn.onclick = () => {
+    if (sessionStorage.getItem('feuAutonext') === '1') {
+      sessionStorage.removeItem('feuAutonext');
+      toast('Autonext stopped.', '#ffb84d');
+    } else {
+      sessionStorage.setItem('feuAutonext', '1');
+      toast('Autonext started — will stop at quizzes, discussions, submissions, or locked modules.', '#7ee787');
+      // Kick the runner immediately on this page so the user sees motion.
+      setTimeout(() => {
+        const next = document.querySelector('a.module-sequencing-button--next, .module-sequence-footer-button--next a, #module_navigation_next a, a[rel="next"]');
+        if (next) next.click();
+      }, 400);
+    }
+    refreshAnDot();
+  };
 
   // Walker "open in tabs" wiring
   const walkOpenBtn = panel.querySelector('#sw-walk-open');
