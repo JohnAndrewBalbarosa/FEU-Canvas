@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "FEU Canvas Helper",
+  "version": "1.0.0",
+  "description": "Pending work dashboard, module blocker finder, and auto-next navigator for FEU Canvas.",
+  "permissions": ["scripting", "activeTab", "storage"],
+  "host_permissions": [
+    "https://feu.instructure.com/*",
+    "https://*.instructure.com/*"
+  ],
+  "action": {
+    "default_title": "FEU Canvas Helper",
+    "default_popup": "popup.html"
+  }
+}
