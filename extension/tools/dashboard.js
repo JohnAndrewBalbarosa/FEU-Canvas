@@ -28,11 +28,20 @@
     return `${Math.floor(m / 60)}h ago`;
   };
 
-  const api = async (path) => {
+  // fresh=true forces bypass of browser HTTP cache (cache: 'no-store' +
+  // per-request cache-buster). Use when refreshing manually so Canvas can't
+  // hand back a stale assignments/modules snapshot.
+  const api = async (path, { fresh = false } = {}) => {
     const out = [];
-    let url = BASE + path + (path.includes('?') ? '&' : '?') + 'per_page=100';
+    const buster = fresh ? `_=${Date.now()}-${Math.random().toString(36).slice(2, 8)}&` : '';
+    let url = BASE + path + (path.includes('?') ? '&' : '?') + buster + 'per_page=100';
+    const init = {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+      ...(fresh ? { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' } } : {}),
+    };
     while (url) {
-      const res = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+      const res = await fetch(url, init);
       if (!res.ok) { console.warn('[Dash] fetch failed', url, res.status); break; }
       const data = await res.json();
       out.push(...(Array.isArray(data) ? data : [data]));
@@ -94,10 +103,12 @@
   const clearCache = () => { try { localStorage.removeItem(CACHE_KEY); } catch {} };
 
   // ---------- fetch fresh ----------
-  const fetchFresh = async () => {
-    let favs = await api('/api/v1/users/self/favorites/courses');
+  const fetchFresh = async ({ fresh = false } = {}) => {
+    const label = fresh ? '[Dash] HARD refresh (bypassing browser HTTP cache)' : '[Dash] refresh';
+    console.log(`%c${label}`, 'color:#79c0ff;font-weight:bold');
+    let favs = await api('/api/v1/users/self/favorites/courses', { fresh });
     if (!favs.length) {
-      const cards = await api('/api/v1/dashboard/dashboard_cards');
+      const cards = await api('/api/v1/dashboard/dashboard_cards', { fresh });
       favs = cards.map(c => ({ id: c.id, name: c.shortName || c.originalName || c.courseCode }));
     }
     const courses = favs.map(c => ({ id: c.id, name: c.name || c.shortName || c.course_code }));
@@ -109,9 +120,22 @@
         // (workflow_state, attempt count). Without it we'd be looking at
         // has_submitted_submissions which is course-wide aggregate state and
         // returns true the moment any single classmate submits.
-        api(`/api/v1/courses/${c.id}/assignments?bucket=unsubmitted&order_by=due_at&include[]=submission`).catch(() => []),
-        api(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`).catch(() => []),
+        api(`/api/v1/courses/${c.id}/assignments?bucket=unsubmitted&order_by=due_at&include[]=submission`, { fresh }).catch(() => []),
+        api(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`, { fresh }).catch(() => []),
       ]);
+
+      // Diagnostic log so the user can verify in DevTools console which
+      // assignments came back from the API and what their submission state is.
+      if (fresh) {
+        console.groupCollapsed(`[Dash] ${c.name} — ${assigns.length} assigns from API (bucket=unsubmitted)`);
+        for (const a of assigns) {
+          const ws = a.submission?.workflow_state || '(none)';
+          const att = a.submission?.attempt ?? 0;
+          const has = a.has_submitted_submissions;
+          console.log(`  • ${a.name} — workflow=${ws} · attempts=${att} · has_submitted_submissions=${has} · locked=${a.locked_for_user}`);
+        }
+        console.groupEnd();
+      }
 
       const isUnsubmittedByMe = (a) => {
         const s = a.submission;
@@ -387,7 +411,7 @@
         <strong style="font-size:15px;">FEU Canvas — Pending Work</strong>
         <div style="display:flex;gap:4px;align-items:center;">
           <span style="font-size:10px;opacity:.6;margin-right:4px;">cached ${age}</span>
-          <button id="feu-refresh" title="Refresh" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">⟳</button>
+          <button id="feu-refresh" title="Refresh (Shift+click = HARD refresh, bypass browser cache)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">⟳</button>
           <button id="feu-close" title="Close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
         </div>
       </div>
@@ -415,12 +439,13 @@
 
     // Wire up
     panel.querySelector('#feu-close').onclick = () => panel.remove();
-    panel.querySelector('#feu-refresh').onclick = async () => {
+    panel.querySelector('#feu-refresh').onclick = async (ev) => {
+      const hard = ev.shiftKey;
       clearCache();
-      root().innerHTML = '<div style="opacity:.85;">Refreshing…</div>';
-      const fresh = await fetchFresh();
-      writeCache(fresh);
-      renderMain(fresh, Date.now());
+      root().innerHTML = `<div style="opacity:.85;">${hard ? 'HARD refreshing (bypassing all caches)…' : 'Refreshing…'}</div>`;
+      const data = await fetchFresh({ fresh: hard });
+      writeCache(data);
+      renderMain(data, Date.now());
     };
 
     // Top-level launcher: ask the bridge to inject the Unlock Modules panel.
