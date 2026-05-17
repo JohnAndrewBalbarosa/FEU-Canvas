@@ -126,6 +126,28 @@
     return out;
   };
 
+  // Bypass browser cache + add a buster so Canvas can't return a stale module
+  // state after we just mutated it. Use this only for rescans (slower).
+  const apiListFresh = async (path) => {
+    const out = [];
+    const buster = `_=${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let url = BASE + path + (path.includes('?') ? '&' : '?') + 'per_page=100&' + buster;
+    while (url) {
+      const res = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+      });
+      if (!res.ok) { console.warn('[Sweep] fresh fetch failed', url, res.status); break; }
+      const data = await res.json();
+      out.push(...(Array.isArray(data) ? data : [data]));
+      const link = res.headers.get('Link') || '';
+      const next = link.match(/<([^>]+)>;\s*rel="next"/);
+      url = next ? next[1] : null;
+    }
+    return out;
+  };
+
   const csrf = () => {
     // Try cookie first (URL-decoded), then meta tag, then form input
     const cookieMatch = document.cookie.match(/_csrf_token=([^;]+)/);
@@ -219,8 +241,10 @@
 
   const blockers = [];
   const moduleStates = {}; // { 'courseName||moduleName': state }
+  const moduleStateMap = new Map(); // `${courseId}-${moduleId}` → mod.state
   for (const { course, modules } of scans) {
     for (const mod of modules) {
+      moduleStateMap.set(`${course.id}-${mod.id}`, mod.state || 'unlocked');
       if (mod.state === 'completed') continue;
       const stateKey = `${course.name}||${mod.name}`;
       moduleStates[stateKey] = mod.state || 'unlocked';
@@ -292,10 +316,127 @@
     </div>`;
   };
 
-  const catBreakdown = Object.values(byCategory)
-    .sort((a, b) => b.items.length - a.items.length)
-    .map(({ cat, items }) => `<span style="background:${cat.color}22;color:${cat.color};border:1px solid ${cat.color}55;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;">${cat.label} ${items.length}</span>`)
-    .join(' ');
+  const courseById = new Map(courses.map(c => [c.id, c]));
+
+  const buildCatBreakdownHtml = (blockersArr) => {
+    const byCat = {};
+    for (const b of blockersArr) (byCat[b.cat.key] ??= { cat: b.cat, items: [] }).items.push(b);
+    return Object.values(byCat)
+      .sort((a, b) => b.items.length - a.items.length)
+      .map(({ cat, items }) => `<span style="background:${cat.color}22;color:${cat.color};border:1px solid ${cat.color}55;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;">${cat.label} ${items.length}</span>`)
+      .join(' ');
+  };
+  const catBreakdown = buildCatBreakdownHtml(blockers);
+
+  const buildBlockersListHtml = (blockersArr) => {
+    if (!blockersArr.length) {
+      return '<div style="opacity:.65;font-size:12px;padding:14px;text-align:center;background:#0d1117;border:1px solid #30363d;border-radius:8px;">✓ No pending blockers. You\'re clear.</div>';
+    }
+    const byCourse = {};
+    for (const b of blockersArr) {
+      const c = (byCourse[b.courseName] ??= { courseName: b.courseName, modules: {} });
+      const m = (c.modules[b.moduleName] ??= { name: b.moduleName, position: b.modulePosition, items: [] });
+      m.items.push(b);
+    }
+    const courseEntries = Object.values(byCourse).sort((a, b) => a.courseName.localeCompare(b.courseName));
+    return courseEntries.map(course => {
+      const mods = Object.values(course.modules).sort((a, b) => a.position - b.position);
+      const totalItems = mods.reduce((s, m) => s + m.items.length, 0);
+      const quickInCourse = mods.reduce((s, m) => s + m.items.filter(i => i.quick).length, 0);
+      return `
+        <details style="margin-bottom:10px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:8px 10px;">
+          <summary style="cursor:pointer;font-weight:700;font-size:13px;list-style:none;">
+            <span style="color:#e6edf3;">▸ ${course.courseName}</span>
+            <span style="float:right;font-size:11px;font-weight:400;opacity:.7;">${totalItems} blockers · ${quickInCourse} quick</span>
+          </summary>
+          ${mods.map(m => {
+            m.items.sort((a, b) => a.itemPosition - b.itemPosition);
+            return `
+              <details style="margin-top:6px;margin-left:6px;background:#161b22;border-left:2px solid #30363d;padding:6px 10px;border-radius:0 6px 6px 0;">
+                <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#8b949e;list-style:none;">
+                  ▸ ${m.name}
+                  <span style="float:right;font-weight:400;opacity:.7;">${m.items.length}</span>
+                </summary>
+                <div style="margin-top:4px;">${m.items.map(renderItem).join('')}</div>
+              </details>
+            `;
+          }).join('')}
+        </details>
+      `;
+    }).join('');
+  };
+
+  // Shared: walk Canvas module-API output → blockers[] in the same shape the
+  // initial scan produces. Used by post-sweep rebuild and the Rescan button.
+  const apiModulesToBlockers = (course, modules) => {
+    const out = [];
+    for (const mod of modules) {
+      if (mod.state === 'completed') continue;
+      const moduleLocked = mod.state === 'locked';
+      for (const item of (mod.items || [])) {
+        const req = item.completion_requirement;
+        if (!req || req.completed) continue;
+        const points = item.content_details?.points_possible ?? null;
+        const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
+        out.push({
+          courseId: course.id, courseName: course.name,
+          moduleId: mod.id, moduleName: mod.name, modulePosition: mod.position ?? 999,
+          moduleState: mod.state || 'unlocked',
+          moduleLocked,
+          itemPosition: item.position ?? 999,
+          itemId: item.id, title: item.title, itemType: item.type,
+          contentId: item.content_id ?? null,
+          reqType: req.type, url: item.html_url, points, cat,
+          quick: QUICK_TYPES.has(req.type) && !moduleLocked,
+        });
+      }
+    }
+    return out;
+  };
+
+  // Refresh the panel's blockers list, summary, and category chips from a
+  // fresh apiListFresh fetch of the given course IDs. Returns the new blockers.
+  const refreshPanelFromCourses = async (courseIds) => {
+    const scans = await Promise.all([...courseIds].map(id => {
+      const course = courseById.get(id);
+      if (!course) return Promise.resolve(null);
+      return apiListFresh(`/api/v1/courses/${id}/modules?include[]=items&include[]=content_details`)
+        .catch(() => [])
+        .then(modules => ({ course, modules }));
+    }));
+    // Build fresh blockers for the touched courses, then merge with untouched-course
+    // blockers from `blockers` so the rest of the panel state stays correct.
+    const touchedIds = new Set(courseIds);
+    const fresh = [];
+    for (const scan of scans) {
+      if (!scan) continue;
+      const { course, modules } = scan;
+      for (const mod of modules) {
+        moduleStateMap.set(`${course.id}-${mod.id}`, mod.state || 'unlocked');
+      }
+      fresh.push(...apiModulesToBlockers(course, modules));
+    }
+    for (const b of blockers) {
+      if (!touchedIds.has(b.courseId)) fresh.push(b);
+    }
+    // Mutate outer `blockers` so subsequent rescans/runs see the latest state.
+    blockers.length = 0;
+    blockers.push(...fresh);
+
+    // Repaint DOM.
+    const quick = fresh.filter(b => b.quick).length;
+    const manual = fresh.length - quick;
+    panel.querySelector('#sw-cat-breakdown').innerHTML = buildCatBreakdownHtml(fresh);
+    panel.querySelector('#sw-quick-count').textContent = quick;
+    panel.querySelector('#sw-manual-count').textContent = manual;
+    panel.querySelector('#sw-header-summary').textContent = `${courses.length} favorited courses · ${fresh.length} total blockers`;
+    panel.querySelector('#sw-blockers').innerHTML = buildBlockersListHtml(fresh);
+    // Re-wire reply buttons inside the freshly-rendered blockers list.
+    panel.querySelectorAll('#sw-blockers .sw-reply-toggle').forEach(btn => {
+      btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn); };
+    });
+    return fresh;
+  };
 
   // ---------- DOM walker (when on /modules page) ----------
   // Notify-only: read-only DOM scan of the current Modules page so the user
@@ -408,20 +549,21 @@
         <button id="sw-ai-settings" title="AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">
           ⚙️ AI <span id="sw-ai-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${AI.isConfigured() ? '#7ee787' : '#8b949e'};margin-left:2px;"></span>
         </button>
+        <button id="sw-rescan" title="Rescan all favorited courses (force fresh from Canvas)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">↻ Rescan</button>
         <button id="sw-close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
       </div>
     </div>
     <div id="sw-ai-panel" style="display:none;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;"></div>
-    <div style="font-size:11px;opacity:.7;margin-bottom:10px;">${courses.length} favorited courses · ${blockers.length} total blockers</div>
+    <div id="sw-header-summary" style="font-size:11px;opacity:.7;margin-bottom:10px;">${courses.length} favorited courses · ${blockers.length} total blockers</div>
 
-    <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">${catBreakdown}</div>
+    <div id="sw-cat-breakdown" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">${catBreakdown}</div>
 
     ${walkerHtml}
 
-    <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;">
-      <div style="font-size:13px;font-weight:600;color:#7ee787;">Quick unlocks: ${quickQueue.length}</div>
+    <div id="sw-summary" style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;">
+      <div style="font-size:13px;font-weight:600;color:#7ee787;">Quick unlocks: <span id="sw-quick-count">${quickQueue.length}</span></div>
       <div style="font-size:11px;opacity:.75;margin-top:2px;">Will auto-complete <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_view</code> + <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_mark_done</code> only. Never submits assignments or takes quizzes.</div>
-      <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Manual needed: ${manualList.length}</div>
+      <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Manual needed: <span id="sw-manual-count">${manualList.length}</span></div>
       <div style="font-size:11px;opacity:.75;margin-top:2px;">Discussions, submissions, quizzes — listed below for you to handle.</div>
     </div>
 
@@ -432,45 +574,32 @@
       <button id="sw-skip" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:8px 14px;cursor:pointer;">View only</button>
     </div>
 
-    ${(() => {
-      // Group: course → module → items
-      const byCourse = {};
-      for (const b of blockers) {
-        const c = (byCourse[b.courseName] ??= { courseName: b.courseName, modules: {} });
-        const m = (c.modules[b.moduleName] ??= { name: b.moduleName, position: b.modulePosition, items: [] });
-        m.items.push(b);
-      }
-      const courseEntries = Object.values(byCourse).sort((a, b) => a.courseName.localeCompare(b.courseName));
-      return courseEntries.map(course => {
-        const mods = Object.values(course.modules).sort((a, b) => a.position - b.position);
-        const totalItems = mods.reduce((s, m) => s + m.items.length, 0);
-        const quickInCourse = mods.reduce((s, m) => s + m.items.filter(i => i.quick).length, 0);
-        return `
-          <details style="margin-bottom:10px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:8px 10px;">
-            <summary style="cursor:pointer;font-weight:700;font-size:13px;list-style:none;">
-              <span style="color:#e6edf3;">▸ ${course.courseName}</span>
-              <span style="float:right;font-size:11px;font-weight:400;opacity:.7;">${totalItems} blockers · ${quickInCourse} quick</span>
-            </summary>
-            ${mods.map(m => {
-              m.items.sort((a, b) => a.itemPosition - b.itemPosition);
-              return `
-                <details style="margin-top:6px;margin-left:6px;background:#161b22;border-left:2px solid #30363d;padding:6px 10px;border-radius:0 6px 6px 0;">
-                  <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#8b949e;list-style:none;">
-                    ▸ ${m.name}
-                    <span style="float:right;font-weight:400;opacity:.7;">${m.items.length}</span>
-                  </summary>
-                  <div style="margin-top:4px;">${m.items.map(renderItem).join('')}</div>
-                </details>
-              `;
-            }).join('')}
-          </details>
-        `;
-      }).join('');
-    })()}
+    <div id="sw-blockers">${buildBlockersListHtml(blockers)}</div>
   `;
 
   panel.querySelector('#sw-close').onclick = () => panel.remove();
   panel.querySelector('#sw-skip').onclick = () => panel.remove();
+
+  // ----- Rescan button (manual fresh fetch of all favorited courses) -----
+  const rescanBtn = panel.querySelector('#sw-rescan');
+  rescanBtn.onclick = async () => {
+    const orig = rescanBtn.textContent;
+    rescanBtn.disabled = true;
+    rescanBtn.textContent = '↻ …';
+    try {
+      await refreshPanelFromCourses(courses.map(c => c.id));
+      rescanBtn.textContent = '✓';
+      toast('Rescan complete.', '#7ee787');
+    } catch (e) {
+      rescanBtn.textContent = '✗';
+      toast(`Rescan failed: ${e.message}`, '#ff6b6b');
+    } finally {
+      setTimeout(() => {
+        rescanBtn.disabled = false;
+        rescanBtn.textContent = orig;
+      }, 1200);
+    }
+  };
 
   // ----- Headless autonext toggle -----
   const anBtn = panel.querySelector('#sw-autonext');
@@ -739,39 +868,62 @@
   if (!quickQueue.length) return;
 
   const MAX_PASSES = 6;
-  const courseById = new Map(courses.map(c => [c.id, c]));
 
-  const rescanQuickQueue = async (courseIds, seenItemIds) => {
-    const scans = await Promise.all([...courseIds].map(id =>
-      apiList(`/api/v1/courses/${id}/modules?include[]=items&include[]=content_details`)
-        .catch(() => [])
-        .then(modules => ({ id, modules }))
-    ));
-    const fresh = [];
-    for (const { id, modules } of scans) {
-      const course = courseById.get(id);
-      if (!course) continue;
-      for (const mod of modules) {
-        if (mod.state === 'completed') continue;
-        const moduleLocked = mod.state === 'locked';
-        for (const item of (mod.items || [])) {
-          const req = item.completion_requirement;
-          if (!req || req.completed) continue;
-          if (!QUICK_TYPES.has(req.type)) continue;
-          if (moduleLocked) continue; // can't unlock — module-level prereq still blocking
-          if (seenItemIds.has(`${id}-${item.id}`)) continue;
-          const points = item.content_details?.points_possible ?? null;
-          const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
-          fresh.push({
-            courseId: id, courseName: course.name,
-            moduleId: mod.id, moduleName: mod.name,
-            itemId: item.id, title: item.title, itemType: item.type,
-            reqType: req.type, url: item.html_url, points, cat,
-          });
+  // Poll Canvas (fresh, uncached) for state to settle after a write pass.
+  // Returns the newly-revealed quick queue (items not yet attempted, in
+  // currently-unlocked modules). Exits early when either new items appear OR
+  // a previously-locked module's state flips. Falls back to whatever the
+  // final poll saw (could be empty — cascade genuinely exhausted).
+  const waitForStateChange = async (courseIds, attempted, logFn) => {
+    const TICKS = 6;          // up to ~6 polls
+    const TICK_MS = 1000;     // 1s between polls
+    let lastResult = [];
+    for (let i = 0; i < TICKS; i++) {
+      await sleep(TICK_MS);
+      const scans = await Promise.all([...courseIds].map(id => {
+        const course = courseById.get(id);
+        if (!course) return Promise.resolve(null);
+        return apiListFresh(`/api/v1/courses/${id}/modules?include[]=items&include[]=content_details`)
+          .catch(() => [])
+          .then(modules => ({ course, modules }));
+      }));
+      let stateFlipped = false;
+      const fresh = [];
+      for (const scan of scans) {
+        if (!scan) continue;
+        const { course, modules } = scan;
+        for (const mod of modules) {
+          const key = `${course.id}-${mod.id}`;
+          const prev = moduleStateMap.get(key);
+          const now = mod.state || 'unlocked';
+          if (prev === 'locked' && now !== 'locked') stateFlipped = true;
+          moduleStateMap.set(key, now);
+          if (now === 'completed') continue;
+          if (now === 'locked') continue; // still gated
+          for (const item of (mod.items || [])) {
+            const req = item.completion_requirement;
+            if (!req || req.completed) continue;
+            if (!QUICK_TYPES.has(req.type)) continue;
+            if (attempted.has(`${course.id}-${item.id}`)) continue;
+            const points = item.content_details?.points_possible ?? null;
+            const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
+            fresh.push({
+              courseId: course.id, courseName: course.name,
+              moduleId: mod.id, moduleName: mod.name,
+              itemId: item.id, title: item.title, itemType: item.type,
+              reqType: req.type, url: item.html_url, points, cat,
+            });
+          }
         }
       }
+      lastResult = fresh;
+      if (fresh.length || stateFlipped) {
+        if (logFn) logFn(`Canvas recomputed after ${i + 1}s (${fresh.length} new quick · ${stateFlipped ? 'module flipped' : 'no flip'}).`, '#8b949e');
+        return fresh;
+      }
     }
-    return fresh;
+    if (logFn) logFn(`No state change after ${TICKS}s — cascade exhausted.`, '#8b949e');
+    return lastResult;
   };
 
   panel.querySelector('#sw-run').onclick = async () => {
@@ -841,27 +993,46 @@
         setProg(`Pass ${pass} · ${passDone + passFailed} / ${currentQueue.length} · total ${totalDone} ok · ${totalFailed} failed`);
       })));
 
-      // Nothing was unlocked this pass → next pass can't reveal anything new.
-      if (passDone === 0) {
-        log(`Pass ${pass} unlocked nothing — stopping.`, '#8b949e');
+      // Bail logic:
+      // - Nothing done AND nothing failed → no items existed; we're done.
+      // - Nothing done BUT some failed → all writes broke (likely 429/403);
+      //   bail to avoid a retry loop. User can rescan + run again.
+      // - Otherwise → at least one item flipped, so wait for Canvas to
+      //   recompute prereqs and look for newly-revealed quick items.
+      if (passDone === 0 && passFailed === 0) {
+        log(`Pass ${pass} had nothing to do — stopping.`, '#8b949e');
+        break;
+      }
+      if (passDone === 0 && passFailed > 0) {
+        log(`Pass ${pass}: all ${passFailed} attempts failed. Aborting to avoid retry loop.`, '#ff6b6b');
         break;
       }
 
-      // Give Canvas a beat to recompute prereqs, then rescan only the courses
-      // we just touched.
-      log(`Rescanning ${affectedCourses.size} affected course(s) for newly-revealed items…`, '#8b949e');
-      await sleep(800);
-      currentQueue = await rescanQuickQueue(affectedCourses, attempted);
-      if (!currentQueue.length) log(`No new quick items revealed. Done.`, '#7ee787');
+      log(`Waiting for Canvas to recompute prereqs across ${affectedCourses.size} course(s)…`, '#8b949e');
+      currentQueue = await waitForStateChange(affectedCourses, attempted, log);
+      if (!currentQueue.length) log(`No further quick items revealed. Cascade done.`, '#7ee787');
     }
 
     if (pass >= MAX_PASSES && currentQueue.length) {
-      log(`Hit MAX_PASSES (${MAX_PASSES}) — bailing. Reopen Auto-Sweep to continue.`, '#ffb84d');
+      log(`Hit MAX_PASSES (${MAX_PASSES}) — bailing. Click ↻ Rescan + Run again to continue.`, '#ffb84d');
     }
 
     setProg(`Done after ${pass} pass${pass === 1 ? '' : 'es'}. ${totalDone} unlocked · ${totalFailed} failed.`);
     btn.textContent = `✓ Unlocked ${totalDone}`;
     btn.style.background = '#143d2b';
+
+    // Repaint the panel from a fresh fetch of the courses we touched so the
+    // user sees up-to-date state without re-injecting the tool.
+    const touchedIdsList = [...new Set(allResults.map(r => r.courseId))];
+    if (touchedIdsList.length) {
+      log(`Refreshing panel from fresh server state…`, '#8b949e');
+      try {
+        await refreshPanelFromCourses(touchedIdsList);
+        log(`✓ Panel refreshed.`, '#7ee787');
+      } catch (e) {
+        log(`Panel refresh failed: ${e.message}`, '#ff6b6b');
+      }
+    }
 
     // Save sweep result so dashboard can show "recently unlocked" banner
     const unlocked = allResults.filter(r => r.ok).map(r => ({
