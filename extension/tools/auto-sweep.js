@@ -614,8 +614,8 @@
     </div>
 
     <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <button id="sw-run" ${quickQueue.length ? '' : 'disabled'} style="flex:1;background:${quickQueue.length ? '#1f6feb' : '#30363d'};color:white;border:none;border-radius:6px;padding:8px;cursor:${quickQueue.length ? 'pointer' : 'not-allowed'};font-weight:600;">
-        🚀 Unlock Modules — ${quickQueue.length} item${quickQueue.length === 1 ? '' : 's'}
+      <button id="sw-run" ${blockers.length ? '' : 'disabled'} style="flex:1;background:${blockers.length ? '#1f6feb' : '#30363d'};color:white;border:none;border-radius:6px;padding:8px;cursor:${blockers.length ? 'pointer' : 'not-allowed'};font-weight:600;">
+        🚀 Unlock Modules — walk ${blockers.length} blocker${blockers.length === 1 ? '' : 's'}
       </button>
       <button id="sw-skip" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:8px 14px;cursor:pointer;">View only</button>
     </div>
@@ -956,14 +956,13 @@
   };
   wireDetailsButtons();
 
-  // ---------- 5. Run sweep (sequential, multi-pass) ----------
-  // Canvas's prereq chain only reveals downstream quick items AFTER upstream
-  // ones complete. So one pass isn't enough — we rescan affected courses
-  // between passes and keep going until no new quick items appear (or we hit
-  // MAX_PASSES as a safety stop).
-  if (!quickQueue.length) return;
-
-  const MAX_PASSES = 6;
+  // ---------- 5. Run sweep — module-parallel, item-sequential walker ----------
+  // Canvas enforces sequential progression WITHIN a module (you can't mark
+  // item 3 as read until items 1 and 2 are). So we walk items one-at-a-time
+  // PER MODULE, but run many MODULES in parallel since their gates are
+  // independent. After each cycle we wait for Canvas to recompute prereqs,
+  // then rescan to pick up modules that just unlocked.
+  if (!quickQueue.length && manualList.length === 0) return;
 
   // Poll Canvas (fresh, uncached) for state to settle after a write pass.
   // Returns the newly-revealed quick queue (items not yet attempted, in
@@ -1044,250 +1043,176 @@
       logBox.scrollTop = logBox.scrollHeight;
     };
 
-    // Outer loop: cycles = (passes + post-sweep full refresh). After each
-    // cycle, we refetch ALL favorited courses and check if any new quick
-    // items appeared anywhere (not just in courses we touched — a sibling
-    // course could have time-released items between cycles too). Keep going
-    // until a full rescan reveals zero quick items, or we hit MAX_CYCLES.
+    // Engine: each "cycle" scans every favorited course for unlocked,
+    // incomplete modules, then walks each module SEQUENTIALLY (respecting
+    // Canvas's per-module sequential gate) while running MODULES in
+    // PARALLEL (up to MODULE_CONCURRENCY). After the cycle finishes, we
+    // wait for Canvas to recompute prereqs, then check if any newly-
+    // unlocked modules appeared. Repeat until no more unlocked-incomplete
+    // modules, or MAX_CYCLES.
+    //
+    // Why module-level parallelism: Canvas 403s parallel mark_read calls
+    // within the same module because items must be visited in order. But
+    // different modules (and different courses) have independent sequence
+    // gates, so walking many modules at once is safe AND fast.
     const MAX_CYCLES = 8;
+    const MODULE_CONCURRENCY = 8;          // walk up to N modules at once
+    const HEAVY = new Set(['must_submit', 'min_score', 'must_contribute']);
+    const moduleCap = limit(MODULE_CONCURRENCY);
+
     let cycle = 0;
-    let pass = 0;
-    let currentQueue = quickQueue.slice();
+    let totalWalked = 0;
+    const stopsAtHeavy = []; // [{ course, module, item, reason }] for final report
+
+    const markItem = async (courseId, moduleId, item) => {
+      const req = item.completion_requirement;
+      // Items without a formal requirement: still send mark_read so Canvas
+      // tracks them as viewed (helps with implicit progress).
+      // Items with must_view / must_mark_done: use the matching endpoint.
+      const type = req?.type;
+      const path = type === 'must_mark_done'
+        ? `/api/v1/courses/${courseId}/modules/${moduleId}/items/${item.id}/done`
+        : `/api/v1/courses/${courseId}/modules/${moduleId}/items/${item.id}/mark_read`;
+      const method = type === 'must_mark_done' ? 'PUT' : 'POST';
+      try {
+        const res = await fetch(BASE + path, {
+          method, credentials: 'include',
+          headers: {
+            'X-CSRF-Token': token,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+        return { ok: res.ok, status: res.status };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    };
+
+    const walkModule = async (course, mod) => {
+      let walked = 0, marked = 0, failed = 0, stop = null;
+      for (const item of (mod.items || [])) {
+        const req = item.completion_requirement;
+        if (req?.completed) continue;
+        if (req && HEAVY.has(req.type)) {
+          stop = { item, reason: req.type };
+          break;
+        }
+        walked++; totalWalked++;
+        attempted.add(`${course.id}-${item.id}`);
+        const r = await markItem(course.id, mod.id, item);
+        if (r.ok) { marked++; totalDone++; allResults.push({ courseId: course.id, courseName: course.name, moduleId: mod.id, moduleName: mod.name, itemId: item.id, title: item.title, itemType: item.type, reqType: req?.type, url: item.html_url, cat: categorize({ name: item.title, itemType: item.type, type: req?.type, points: item.content_details?.points_possible }), ok: true }); }
+        else { failed++; totalFailed++; }
+        await sleep(120 + Math.random() * 120); // throttle within a module
+      }
+      if (stop) stopsAtHeavy.push({ course: course.name, module: mod.name, item: stop.item.title, reason: stop.reason, url: stop.item.html_url });
+      return { course, mod, walked, marked, failed, stop };
+    };
+
     let stopReason = null;
 
-    outer: while (currentQueue.length && cycle < MAX_CYCLES) {
+    // Helper: scan all favorited courses, return [{course, mod}] for every
+    // module that's both unlocked-by-default AND has incomplete items.
+    // Already-completed modules and locked modules are filtered out.
+    const scanUnlockedIncompleteModules = async () => {
+      const scans = await Promise.all(courses.map(c =>
+        apiListFresh(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`)
+          .catch(() => [])
+          .then(modules => ({ course: c, modules }))
+      ));
+      const out = [];
+      for (const { course, modules } of scans) {
+        for (const mod of modules) {
+          if (mod.state === 'completed') continue;
+          if (mod.state === 'locked') continue;
+          // Has at least one non-completed item that isn't a heavy gate we
+          // already know we'll stop at?
+          const hasWorkable = (mod.items || []).some(it => {
+            const req = it.completion_requirement;
+            if (req?.completed) return false;
+            if (req && HEAVY.has(req.type)) return false;
+            return true; // viewable or quick
+          });
+          if (!hasWorkable) continue;
+          out.push({ course, mod });
+          // Seed state map so waitForStateChange can detect flips.
+          moduleStateMap.set(`${course.id}-${mod.id}`, mod.state || 'unlocked');
+        }
+      }
+      return out;
+    };
+
+    outer: while (cycle < MAX_CYCLES) {
       cycle++;
-      log(`══ Cycle ${cycle}: ${currentQueue.length} quick items in queue ══`, '#a371f7');
-
-      // Inner: cascade-drain passes within a cycle.
-      let cyclePass = 0;
-      while (currentQueue.length && cyclePass < MAX_PASSES) {
-        cyclePass++; pass++;
-        log(`── Pass ${pass} (cycle ${cycle}, pass ${cyclePass}): ${currentQueue.length} items ──`, '#79c0ff');
-        let passDone = 0, passFailed = 0;
-        const affectedCourses = new Set();
-
-        await Promise.all(currentQueue.map(item => cap(async () => {
-          attempted.add(`${item.courseId}-${item.itemId}`);
-          affectedCourses.add(item.courseId);
-          try {
-            await sleep(150 + Math.random() * 250);
-            const path = item.reqType === 'must_view'
-              ? `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/mark_read`
-              : `/api/v1/courses/${item.courseId}/modules/${item.moduleId}/items/${item.itemId}/done`;
-            const method = item.reqType === 'must_view' ? 'POST' : 'PUT';
-            const res = await fetch(BASE + path, {
-              method,
-              credentials: 'include',
-              headers: {
-                'X-CSRF-Token': token,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-              },
-            });
-            if (res.ok) {
-              passDone++; totalDone++;
-              log(`✓ ${item.title.slice(0, 70)}`, '#7ee787');
-              allResults.push({ ...item, ok: true });
-            } else {
-              passFailed++; totalFailed++;
-              log(`✗ ${item.title.slice(0, 70)} (${res.status})`, '#ff6b6b');
-              allResults.push({ ...item, ok: false, status: res.status });
-            }
-          } catch (e) {
-            passFailed++; totalFailed++;
-            log(`✗ ${item.title.slice(0, 70)} (${e.message})`, '#ff6b6b');
-            allResults.push({ ...item, ok: false, error: e.message });
-          }
-          setProg(`Cycle ${cycle} · Pass ${pass} · ${passDone + passFailed} / ${currentQueue.length} · total ${totalDone} ok · ${totalFailed} failed`);
-        })));
-
-        if (passDone === 0 && passFailed === 0) {
-          log(`Pass ${pass} had nothing to do — ending cycle.`, '#8b949e');
-          break;
-        }
-        if (passDone === 0 && passFailed > 0) {
-          log(`Pass ${pass}: all ${passFailed} attempts failed. Aborting.`, '#ff6b6b');
-          stopReason = 'all-failed';
-          break outer;
-        }
-
-        log(`Waiting for Canvas to recompute prereqs across ${affectedCourses.size} course(s)…`, '#8b949e');
-        currentQueue = await waitForStateChange(affectedCourses, attempted, log);
-        if (!currentQueue.length) log(`No further quick items in this cycle.`, '#7ee787');
-      }
-
-      if (cyclePass >= MAX_PASSES && currentQueue.length) {
-        log(`Cycle ${cycle} hit MAX_PASSES (${MAX_PASSES}). Continuing to next cycle.`, '#ffb84d');
-      }
-
-      // End of cycle: do a FULL refresh across all favorited courses and
-      // check whether any new quick items appeared anywhere. If yes, queue
-      // them and start another cycle. If no, we're truly done.
-      log(`Cycle ${cycle} done. Doing full rescan of all ${courses.length} courses…`, '#8b949e');
-      try {
-        const fresh = await refreshPanelFromCourses(courses.map(c => c.id));
-        const nextQueue = fresh.filter(b => b.quick && !attempted.has(`${b.courseId}-${b.itemId}`));
-        if (!nextQueue.length) {
-          log(`✓ Full rescan found no new quick items. Cascade fully drained.`, '#7ee787');
-          currentQueue = [];
-          stopReason = 'drained';
-          break;
-        }
-        log(`Full rescan revealed ${nextQueue.length} new quick item(s). Starting cycle ${cycle + 1}…`, '#a371f7');
-        currentQueue = nextQueue;
-      } catch (e) {
-        log(`Rescan failed: ${e.message}. Stopping.`, '#ff6b6b');
-        stopReason = 'rescan-failed';
+      const targets = await scanUnlockedIncompleteModules();
+      if (!targets.length) {
+        log(`✓ No more unlocked-incomplete modules. Cascade fully drained.`, '#7ee787');
+        stopReason = 'drained';
         break;
       }
+      log(`══ Cycle ${cycle}: ${targets.length} unlocked module(s) to walk (parallel × ${MODULE_CONCURRENCY}) ══`, '#a371f7');
+
+      let cycleMarked = 0, cycleFailed = 0, cycleStops = 0;
+      const affectedCourses = new Set();
+      await Promise.all(targets.map(({ course, mod }) => moduleCap(async () => {
+        affectedCourses.add(course.id);
+        const r = await walkModule(course, mod);
+        cycleMarked += r.marked;
+        cycleFailed += r.failed;
+        if (r.stop) cycleStops++;
+        const stopLabel = r.stop
+          ? (r.stop.reason === 'must_submit'    ? ' ⏸ stops at submission'
+           : r.stop.reason === 'min_score'      ? ' ⏸ stops at quiz'
+           : r.stop.reason === 'must_contribute'? ' ⏸ stops at discussion'
+           : ` ⏸ stops at ${r.stop.reason}`)
+          : ' ✓';
+        log(`  ${course.name} · ${mod.name}: marked ${r.marked}/${r.walked}${r.failed ? ` · ${r.failed} fail` : ''}${stopLabel}`, r.stop ? '#ffb84d' : '#7ee787');
+        setProg(`Cycle ${cycle} · ${cycleMarked} marked · ${cycleFailed} failed · ${cycleStops} stopped at heavy`);
+      })));
+
+      log(`Cycle ${cycle} done: ${cycleMarked} marked across ${targets.length} module(s). Waiting for Canvas to recompute prereqs…`, '#8b949e');
+      await waitForStateChange(affectedCourses, attempted, log);
     }
 
-    if (cycle >= MAX_CYCLES && currentQueue.length) {
+    if (cycle >= MAX_CYCLES) {
       log(`Hit MAX_CYCLES (${MAX_CYCLES}). Click ↻ Rescan + Run again if more items appear.`, '#ffb84d');
       stopReason = stopReason || 'max-cycles';
     }
 
-    // ---------- Headless Autonext phase ----------
-    // The bulk sweep above only touches items with a formal must_view /
-    // must_mark_done completion_requirement. Many Canvas items don't have
-    // one but Canvas still tracks them as "viewed" via mark_read. Walking
-    // each unlocked module sequentially via the module_item_sequence API
-    // catches those too AND surfaces the first heavy blocker per course
-    // (quiz / discussion / submission / locked-next-module) as a precise
-    // "you got stuck here" pinpoint.
-    log(`── Headless Autonext: walking each course's sequence ──`, '#a371f7');
-    const HEAVY = new Set(['must_submit', 'min_score', 'must_contribute']);
-    let anWalked = 0, anMarked = 0, anStops = [];
-
-    const walkOneCourse = async (course) => {
-      // Find a starting point: first item in an unlocked, incomplete module
-      // that has either no requirement or a quick requirement we can act on.
-      let mods;
-      try {
-        mods = await apiListFresh(`/api/v1/courses/${course.id}/modules?include[]=items&include[]=content_details`);
-      } catch { return; }
-
-      let startItem = null, startModuleId = null;
-      for (const mod of mods) {
-        if (mod.state === 'completed' || mod.state === 'locked') continue;
-        for (const item of (mod.items || [])) {
-          // Skip items that are already complete OR are heavy (we'll stop there
-          // when we reach them via the walk).
-          if (item.completion_requirement?.completed) continue;
-          startItem = item; startModuleId = mod.id;
-          break;
-        }
-        if (startItem) break;
+    // ----- Final summary + UI refresh -----
+    if (stopsAtHeavy.length) {
+      log(`── ${stopsAtHeavy.length} module(s) stopped at items needing you: ──`, '#ffb84d');
+      const seen = new Set();
+      for (const s of stopsAtHeavy) {
+        const key = `${s.course}|${s.item}`;
+        if (seen.has(key)) continue; seen.add(key);
+        log(`  ${s.course} · ${s.module}: ${s.item} (${s.reason})`, '#ffb84d');
       }
-      if (!startItem) {
-        log(`  ${course.name}: nothing to walk (already complete or all heavy).`, '#8b949e');
-        return;
-      }
-
-      let current = { ...startItem, module_id: startModuleId };
-      const MAX = 150;
-      let walked = 0, marked = 0, stop = null;
-      for (let step = 0; step < MAX && current; step++) {
-        walked++; anWalked++;
-        const req = current.completion_requirement;
-
-        // Heavy → stop, surface it.
-        if (req && HEAVY.has(req.type) && !req.completed) {
-          stop = { reason: req.type, title: current.title, url: current.html_url };
-          break;
-        }
-
-        // Mark viewable items as read. Canvas tolerates this even for items
-        // without a formal must_view req — it just updates the "viewed" flag.
-        if (!req || req.type === 'must_view' || (req.type === 'must_mark_done' && !req.completed)) {
-          try {
-            const path = req?.type === 'must_mark_done'
-              ? `/api/v1/courses/${course.id}/modules/${current.module_id}/items/${current.id}/done`
-              : `/api/v1/courses/${course.id}/modules/${current.module_id}/items/${current.id}/mark_read`;
-            const method = req?.type === 'must_mark_done' ? 'PUT' : 'POST';
-            const res = await fetch(BASE + path, {
-              method,
-              credentials: 'include',
-              headers: {
-                'X-CSRF-Token': csrf(),
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-              },
-            });
-            if (res.ok) { marked++; anMarked++; }
-          } catch {}
-        }
-
-        // Next item via sequence API.
-        let next = null;
-        try {
-          const seq = await apiListFresh(`/api/v1/courses/${course.id}/module_item_sequence?asset_type=ModuleItem&asset_id=${current.id}`);
-          const seqItem = seq?.[0];
-          const nxt = seqItem?.items?.[0]?.next;
-          if (nxt) {
-            // Hydrate the full item record.
-            const full = await fetch(`${BASE}/api/v1/courses/${course.id}/modules/${nxt.module_id}/items/${nxt.id}`, {
-              credentials: 'include', cache: 'no-store',
-              headers: { Accept: 'application/json' },
-            }).then(r => r.ok ? r.json() : null).catch(() => null);
-            if (full) next = { ...full, module_id: nxt.module_id };
-          }
-        } catch {}
-
-        if (!next) { stop = { reason: 'end-of-sequence' }; break; }
-        // If the next item is in a module that's still locked, stop.
-        if (next.module_id !== current.module_id) {
-          const lockedMod = mods.find(m => m.id === next.module_id);
-          if (lockedMod?.state === 'locked') {
-            stop = { reason: 'next-module-locked', title: next.title, url: next.html_url };
-            break;
-          }
-        }
-        current = next;
-        await sleep(150); // throttle
-      }
-      if (!stop && walked >= MAX) stop = { reason: 'max-steps' };
-
-      const reasonLabel = stop?.reason === 'must_submit'    ? '⏸ stops at submission'
-                       : stop?.reason === 'min_score'       ? '⏸ stops at quiz'
-                       : stop?.reason === 'must_contribute' ? '⏸ stops at discussion'
-                       : stop?.reason === 'next-module-locked' ? '🔒 next module locked'
-                       : stop?.reason === 'end-of-sequence' ? '✓ end of sequence'
-                       : stop?.reason === 'max-steps'       ? '⚠ hit max steps'
-                       : 'done';
-      log(`  ${course.name}: walked ${walked}, marked ${marked}, ${reasonLabel}${stop?.title ? ` (${stop.title.slice(0, 50)})` : ''}`, stop?.reason?.startsWith('must') ? '#ffb84d' : '#7ee787');
-      if (stop?.title && stop?.url) anStops.push({ course: course.name, ...stop });
-    };
-
-    // Walk all favorited courses in parallel (each is a separate Canvas
-    // sequence, no contention between them).
-    await Promise.all(courses.map(walkOneCourse));
-    log(`Autonext done: walked ${anWalked} items, marked ${anMarked}, ${anStops.length} courses stopped at heavy blockers.`, '#a371f7');
-
-    // Final UI refresh to reflect any newly-marked items.
+    }
+    log(`Refreshing panel from fresh server state…`, '#8b949e');
     try {
       await refreshPanelFromCourses(courses.map(c => c.id));
-    } catch {}
-
-    setProg(`Done after ${cycle} cycle${cycle === 1 ? '' : 's'}, ${pass} pass${pass === 1 ? '' : 'es'} + autonext. ${totalDone + anMarked} unlocked · ${totalFailed} failed.`);
-    btn.textContent = `✓ Unlocked ${totalDone + anMarked}`;
+      log(`✓ Panel refreshed.`, '#7ee787');
+    } catch (e) {
+      log(`Panel refresh failed: ${e.message}`, '#ff6b6b');
+    }
+    setProg(`Done after ${cycle} cycle${cycle === 1 ? '' : 's'}. ${totalDone} marked · ${totalFailed} failed · ${stopsAtHeavy.length} stops.`);
+    btn.textContent = `✓ Unlocked ${totalDone}`;
     btn.style.background = '#143d2b';
 
-    // Save sweep result so dashboard can show "recently unlocked" banner
-    const unlocked = allResults.filter(r => r.ok).map(r => ({
+    // Save sweep result for dashboard banner
+    const unlocked = allResults.map(r => ({
       title: r.title, courseName: r.courseName, moduleName: r.moduleName,
       url: r.url, cat: { label: r.cat.label, color: r.cat.color, key: r.cat.key },
       reqType: r.reqType, itemType: r.itemType,
     }));
     try {
       localStorage.setItem(SWEEP_KEY, JSON.stringify({ at: Date.now(), unlocked, manualPending: manualList.length }));
-      localStorage.removeItem('feuDashCache'); // force dashboard refetch
+      localStorage.removeItem('feuDashCache');
     } catch {}
 
-    console.log(`%c[Sweep] ${cycle} cycles · ${pass} passes · ${totalDone} unlocked · ${totalFailed} failed · ${manualList.length} still manual · stop=${stopReason || 'normal'}.`, 'color:#7ee787;font-weight:bold');
-    window.FEULastSweep = { unlocked, manual: manualList, cycles: cycle, passes: pass, stopReason };
+    console.log(`%c[Sweep] ${cycle} cycles · ${totalWalked} walked · ${totalDone} marked · ${totalFailed} failed · ${stopsAtHeavy.length} heavy stops · stop=${stopReason || 'normal'}.`, 'color:#7ee787;font-weight:bold');
+    window.FEULastSweep = { unlocked, manual: manualList, cycles: cycle, totalWalked, stopsAtHeavy, stopReason };
   };
 })();
