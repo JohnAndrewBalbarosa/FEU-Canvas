@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FEU Canvas Helper",
-  "version": "1.2.0",
-  "description": "Pending work dashboard, module blocker finder, and headless auto-next navigator for FEU Canvas.",
+  "version": "1.3.0",
+  "description": "Pending work dashboard with headless API autonext, module blocker finder, and bulk auto-sweep for FEU Canvas.",
   "permissions": ["scripting", "activeTab", "storage"],
   "host_permissions": [
     "https://feu.instructure.com/*",
@@ -12,15 +12,6 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
-    {
-      "matches": [
-        "https://feu.instructure.com/*",
-        "https://*.instructure.com/*"
-      ],
-      "js": ["autonext-runner.js"],
-      "run_at": "document_idle",
-      "world": "MAIN"
-    },
     {
       "matches": [
         "https://feu.instructure.com/*",
