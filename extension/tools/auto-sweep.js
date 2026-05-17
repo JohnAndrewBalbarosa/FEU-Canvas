@@ -1063,6 +1063,20 @@
     let cycle = 0;
     let totalWalked = 0;
     const stopsAtHeavy = []; // [{ course, module, item, reason }] for final report
+    const stopsSkipped = []; // [{ course, module, item }] — first-item-locked, grey skips
+
+    // Resume cache: remember the last module per course where we made
+    // progress, so the next run prioritizes walking it first (the "continue
+    // from where I left off" feel).
+    const RESUME_KEY = 'feuSweepResume';
+    const readResumeCache = () => {
+      try { return JSON.parse(localStorage.getItem(RESUME_KEY) || '{}'); }
+      catch { return {}; }
+    };
+    const writeResumeCache = (obj) => {
+      try { localStorage.setItem(RESUME_KEY, JSON.stringify(obj)); } catch {}
+    };
+    const resumeCache = readResumeCache();
 
     const markItem = async (courseId, moduleId, item) => {
       const req = item.completion_requirement;
@@ -1091,7 +1105,7 @@
     };
 
     const walkModule = async (course, mod) => {
-      let walked = 0, marked = 0, failed = 0, stop = null;
+      let walked = 0, marked = 0, failed = 0, stop = null, firstAttempt = true;
       for (const item of (mod.items || [])) {
         const req = item.completion_requirement;
         if (req?.completed) continue;
@@ -1102,11 +1116,34 @@
         walked++; totalWalked++;
         attempted.add(`${course.id}-${item.id}`);
         const r = await markItem(course.id, mod.id, item);
-        if (r.ok) { marked++; totalDone++; allResults.push({ courseId: course.id, courseName: course.name, moduleId: mod.id, moduleName: mod.name, itemId: item.id, title: item.title, itemType: item.type, reqType: req?.type, url: item.html_url, cat: categorize({ name: item.title, itemType: item.type, type: req?.type, points: item.content_details?.points_possible }), ok: true }); }
-        else { failed++; totalFailed++; }
+        if (r.ok) {
+          marked++; totalDone++;
+          allResults.push({ courseId: course.id, courseName: course.name, moduleId: mod.id, moduleName: mod.name, itemId: item.id, title: item.title, itemType: item.type, reqType: req?.type, url: item.html_url, cat: categorize({ name: item.title, itemType: item.type, type: req?.type, points: item.content_details?.points_possible }), ok: true });
+        } else if (firstAttempt && (r.status === 401 || r.status === 403)) {
+          // First item is sub-locked by an item-level prereq (Canvas says
+          // "unlocked module" but blocks the first item anyway). Don't
+          // burn through the rest — they'll all 403 too. Skip cleanly.
+          stop = { item, reason: 'first-item-locked' };
+          walked--; totalWalked--;  // don't count this as walked work
+          break;
+        } else {
+          failed++; totalFailed++;
+        }
+        firstAttempt = false;
         await sleep(120 + Math.random() * 120); // throttle within a module
       }
-      if (stop) stopsAtHeavy.push({ course: course.name, module: mod.name, item: stop.item.title, reason: stop.reason, url: stop.item.html_url });
+      if (stop) {
+        if (stop.reason === 'first-item-locked') {
+          stopsSkipped.push({ course: course.name, module: mod.name, item: stop.item.title, url: stop.item.html_url });
+        } else {
+          stopsAtHeavy.push({ course: course.name, module: mod.name, item: stop.item.title, reason: stop.reason, url: stop.item.html_url });
+        }
+      }
+      // Update resume cache only when we actually made progress here.
+      if (marked > 0) {
+        resumeCache[course.id] = mod.id;
+        writeResumeCache(resumeCache);
+      }
       return { course, mod, walked, marked, failed, stop };
     };
 
@@ -1140,6 +1177,14 @@
           moduleStateMap.set(`${course.id}-${mod.id}`, mod.state || 'unlocked');
         }
       }
+      // Resume-aware ordering: cached "last module per course" goes first.
+      out.sort((a, b) => {
+        const aResume = resumeCache[a.course.id] === a.mod.id ? 0 : 1;
+        const bResume = resumeCache[b.course.id] === b.mod.id ? 0 : 1;
+        if (aResume !== bResume) return aResume - bResume;
+        if (a.course.name !== b.course.name) return a.course.name.localeCompare(b.course.name);
+        return (a.mod.position ?? 999) - (b.mod.position ?? 999);
+      });
       return out;
     };
 
@@ -1161,13 +1206,18 @@
         cycleMarked += r.marked;
         cycleFailed += r.failed;
         if (r.stop) cycleStops++;
-        const stopLabel = r.stop
-          ? (r.stop.reason === 'must_submit'    ? ' ⏸ stops at submission'
-           : r.stop.reason === 'min_score'      ? ' ⏸ stops at quiz'
-           : r.stop.reason === 'must_contribute'? ' ⏸ stops at discussion'
-           : ` ⏸ stops at ${r.stop.reason}`)
-          : ' ✓';
-        log(`  ${course.name} · ${mod.name}: marked ${r.marked}/${r.walked}${r.failed ? ` · ${r.failed} fail` : ''}${stopLabel}`, r.stop ? '#ffb84d' : '#7ee787');
+        let stopLabel = ' ✓', lineColor = '#7ee787';
+        if (r.stop) {
+          if (r.stop.reason === 'first-item-locked') {
+            stopLabel = ` ⊘ skipped (item 1 sub-locked: ${r.stop.item.title.slice(0, 50)})`;
+            lineColor = '#8b949e';
+          } else {
+            const heavyMap = { must_submit: 'submission', min_score: 'quiz', must_contribute: 'discussion' };
+            stopLabel = ` ⏸ stops at ${heavyMap[r.stop.reason] || r.stop.reason}`;
+            lineColor = '#ffb84d';
+          }
+        }
+        log(`  ${course.name} · ${mod.name}: marked ${r.marked}/${r.walked}${r.failed ? ` · ${r.failed} fail` : ''}${stopLabel}`, lineColor);
         setProg(`Cycle ${cycle} · ${cycleMarked} marked · ${cycleFailed} failed · ${cycleStops} stopped at heavy`);
       })));
 
@@ -1188,6 +1238,15 @@
         const key = `${s.course}|${s.item}`;
         if (seen.has(key)) continue; seen.add(key);
         log(`  ${s.course} · ${s.module}: ${s.item} (${s.reason})`, '#ffb84d');
+      }
+    }
+    if (stopsSkipped.length) {
+      log(`── ${stopsSkipped.length} module(s) skipped (item-level prereq from earlier module): ──`, '#8b949e');
+      const seen = new Set();
+      for (const s of stopsSkipped) {
+        const key = `${s.course}|${s.item}`;
+        if (seen.has(key)) continue; seen.add(key);
+        log(`  ${s.course} · ${s.module}: ${s.item}`, '#8b949e');
       }
     }
     log(`Refreshing panel from fresh server state…`, '#8b949e');
