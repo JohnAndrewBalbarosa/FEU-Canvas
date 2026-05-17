@@ -187,8 +187,6 @@
   const renderModal = (d) => {
     const { course, pending, blockers } = d;
     const now = new Date();
-    const firstQuick = blockers.find(b => b.quick);
-    const firstBlocker = firstQuick || blockers[0];
 
     const pendingHtml = pending.map(p => {
       const isOverdue = p.due && new Date(p.due) < now;
@@ -240,13 +238,7 @@
     return `
       <button id="feu-back" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;margin-bottom:10px;">← All courses</button>
       <div style="font-weight:700;font-size:15px;margin-bottom:8px;">${course.name}</div>
-      ${blockers.length ? `
-        <div style="display:flex;gap:6px;margin-bottom:12px;">
-          <button id="feu-sweep" style="flex:1;background:#1f6feb;color:white;border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:12px;font-weight:600;">🪄 Auto-Sweep</button>
-          <button id="feu-autonext" ${firstBlocker ? `data-url="${firstBlocker.url}"` : 'disabled'} style="flex:1;background:${firstBlocker ? '#a371f7' : '#30363d'};color:white;border:none;border-radius:6px;padding:7px;cursor:${firstBlocker ? 'pointer' : 'not-allowed'};font-size:12px;font-weight:600;">⏭ Autonext</button>
-        </div>
-        <div id="feu-action-status" style="font-size:10.5px;opacity:.7;margin:-6px 0 10px;min-height:13px;"></div>
-      ` : ''}
+      <div style="font-size:11px;opacity:.6;margin-bottom:10px;">Results only. To act on these, use 🚀 Unlock Modules at the top.</div>
       ${pending.length ? `
         <details style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#7ee787;list-style:none;">
@@ -344,7 +336,12 @@
           <button id="feu-close" title="Close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
         </div>
       </div>
-      <div style="font-size:11px;opacity:.7;margin-bottom:10px;">${courseData.length} favorited courses</div>
+      <div style="font-size:11px;opacity:.7;margin-bottom:10px;">${courseData.length} favorited courses · this dashboard is read-only</div>
+
+      <button id="feu-unlock" style="display:block;width:100%;background:#1f6feb;color:white;border:none;border-radius:8px;padding:9px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:10px;">
+        🚀 Unlock Modules — opens sweep panel
+      </button>
+      <div id="feu-unlock-status" style="font-size:10.5px;opacity:.75;margin:-4px 0 10px;min-height:13px;"></div>
 
       ${renderSweepBanner(sweep)}
 
@@ -369,6 +366,43 @@
       const fresh = await fetchFresh();
       writeCache(fresh);
       renderMain(fresh, Date.now());
+    };
+
+    // Top-level launcher: ask the bridge to inject the Unlock Modules panel.
+    const unlockBtn = panel.querySelector('#feu-unlock');
+    const unlockStatus = panel.querySelector('#feu-unlock-status');
+    unlockBtn.onclick = () => {
+      unlockBtn.disabled = true;
+      unlockBtn.textContent = '🚀 launching…';
+      unlockStatus.textContent = 'Asking the extension to inject the Unlock Modules panel…';
+      unlockStatus.style.color = '#8b949e';
+      const handler = (ev) => {
+        if (ev.source !== window) return;
+        const data = ev.data;
+        if (!data || data.source !== 'feu' || data.kind !== 'inject-result' || data.tool !== 'auto-sweep') return;
+        window.removeEventListener('message', handler);
+        if (data.ok) {
+          unlockStatus.textContent = '✓ Unlock Modules panel opened. You can close this dashboard.';
+          unlockStatus.style.color = '#7ee787';
+          unlockBtn.textContent = '✓ launched';
+        } else {
+          unlockStatus.textContent = `Failed: ${data.error || 'unknown'}.`;
+          unlockStatus.style.color = '#ff6b6b';
+          unlockBtn.disabled = false;
+          unlockBtn.textContent = '🚀 Unlock Modules — opens sweep panel';
+        }
+      };
+      window.addEventListener('message', handler);
+      window.postMessage({ source: 'feu', action: 'inject', tool: 'auto-sweep' }, '*');
+      setTimeout(() => {
+        if (unlockBtn.disabled && unlockBtn.textContent === '🚀 launching…') {
+          window.removeEventListener('message', handler);
+          unlockStatus.textContent = 'No reply from bridge. Reload the extension at chrome://extensions.';
+          unlockStatus.style.color = '#ff6b6b';
+          unlockBtn.disabled = false;
+          unlockBtn.textContent = '🚀 Unlock Modules — opens sweep panel';
+        }
+      }, 3000);
     };
 
     const sweepBanner = panel.querySelector('#feu-sweep-banner');
@@ -410,235 +444,6 @@
       modal.innerHTML = '';
       bento.style.display = 'grid';
     };
-
-    const setActionStatus = (text, color) => {
-      const el = panel.querySelector('#feu-action-status');
-      if (!el) return;
-      el.textContent = text || '';
-      if (color) el.style.color = color;
-    };
-
-    const sweepBtn = panel.querySelector('#feu-sweep');
-    if (sweepBtn) {
-      sweepBtn.onclick = () => {
-        sweepBtn.disabled = true;
-        sweepBtn.textContent = '🪄 launching…';
-        setActionStatus('Asking the extension to inject Auto-Sweep…', '#8b949e');
-        const handler = (ev) => {
-          if (ev.source !== window) return;
-          const data = ev.data;
-          if (!data || data.source !== 'feu' || data.kind !== 'inject-result' || data.tool !== 'auto-sweep') return;
-          window.removeEventListener('message', handler);
-          if (data.ok) {
-            setActionStatus('✓ Auto-Sweep panel opened. (You can close this dashboard.)', '#7ee787');
-            sweepBtn.textContent = '✓ launched';
-          } else {
-            setActionStatus(`Failed: ${data.error || 'unknown'}. Try the popup button instead.`, '#ff6b6b');
-            sweepBtn.disabled = false;
-            sweepBtn.textContent = '🪄 Auto-Sweep';
-          }
-        };
-        window.addEventListener('message', handler);
-        window.postMessage({ source: 'feu', action: 'inject', tool: 'auto-sweep' }, '*');
-        // Safety: if no reply in 3s, restore the button.
-        setTimeout(() => {
-          if (sweepBtn.disabled && sweepBtn.textContent === '🪄 launching…') {
-            window.removeEventListener('message', handler);
-            setActionStatus('No reply from bridge. Reload the extension at chrome://extensions.', '#ff6b6b');
-            sweepBtn.disabled = false;
-            sweepBtn.textContent = '🪄 Auto-Sweep';
-          }
-        }, 3000);
-      };
-    }
-
-    const anBtn = panel.querySelector('#feu-autonext');
-    if (anBtn && !anBtn.disabled) {
-      anBtn.onclick = () => runHeadlessAutonext(d, anBtn, setActionStatus);
-    }
-  };
-
-  // ---------- Headless Autonext ----------
-  // Walks Canvas's module-item chain via the API, marking each must_view /
-  // must_mark_done as completed, until it hits a heavy blocker (must_submit /
-  // must_score / must_contribute) or the next module is locked. No browser
-  // navigation. The user stays on the dashboard the whole time and gets a
-  // "you got stuck here" pinpoint at the end.
-  const csrfToken = () => {
-    const m = document.cookie.match(/_csrf_token=([^;]+)/);
-    if (m) return decodeURIComponent(m[1]);
-    return document.querySelector('meta[name="csrf-token"]')?.content
-      || document.querySelector('input[name="authenticity_token"]')?.value
-      || '';
-  };
-
-  const HEAVY_TYPES = new Set(['must_submit', 'min_score', 'must_contribute']);
-  const QUICK_TYPES = new Set(['must_view', 'must_mark_done']);
-
-  const fetchJson = (path) => fetch(BASE + path, {
-    credentials: 'include',
-    cache: 'no-store',
-    headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
-  }).then(r => r.ok ? r.json() : Promise.reject(new Error(`${path} → ${r.status}`)));
-
-  const completeItem = async (courseId, item) => {
-    if (!item.completion_requirement) return { skipped: 'no-req' };
-    if (item.completion_requirement.completed) return { skipped: 'already-done' };
-    const type = item.completion_requirement.type;
-    if (!QUICK_TYPES.has(type)) return { skipped: 'heavy' };
-    const path = type === 'must_view'
-      ? `/api/v1/courses/${courseId}/modules/${item.module_id}/items/${item.id}/mark_read`
-      : `/api/v1/courses/${courseId}/modules/${item.module_id}/items/${item.id}/done`;
-    const method = type === 'must_view' ? 'POST' : 'PUT';
-    const res = await fetch(BASE + path, {
-      method,
-      credentials: 'include',
-      headers: {
-        'X-CSRF-Token': csrfToken(),
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-    });
-    if (!res.ok) throw new Error(`${type} failed (${res.status})`);
-    return { ok: true, type };
-  };
-
-  // Returns the first quick blocker's API-fetched item record (we need
-  // module_id, completion_requirement, etc. which the dashboard cache may
-  // not have). We use a fresh fetch of the course's modules to find it.
-  const findStartItem = async (course) => {
-    const mods = await fetchJson(`/api/v1/courses/${course.id}/modules?include[]=items&include[]=content_details&per_page=100`);
-    for (const mod of mods) {
-      if (mod.state === 'completed' || mod.state === 'locked') continue;
-      for (const item of (mod.items || [])) {
-        const req = item.completion_requirement;
-        if (!req || req.completed) continue;
-        if (HEAVY_TYPES.has(req.type)) return { item, blocker: 'heavy', mod };
-        if (QUICK_TYPES.has(req.type)) {
-          return { item: { ...item, module_id: mod.id }, blocker: null, mod };
-        }
-      }
-    }
-    return null;
-  };
-
-  const getNextItem = async (courseId, currentItemId) => {
-    try {
-      const seq = await fetchJson(`/api/v1/courses/${courseId}/module_item_sequence?asset_type=ModuleItem&asset_id=${currentItemId}`);
-      const next = seq.items?.[0]?.next;
-      if (!next) return null;
-      // The sequence endpoint gives a sparse next; refetch the full item record.
-      const fullItem = await fetchJson(`/api/v1/courses/${courseId}/modules/${next.module_id}/items/${next.id}`);
-      return { ...fullItem, module_id: next.module_id };
-    } catch (e) {
-      console.warn('[Autonext] sequence fetch failed', e);
-      return null;
-    }
-  };
-
-  const moduleIsLocked = async (courseId, moduleId) => {
-    try {
-      const mod = await fetchJson(`/api/v1/courses/${courseId}/modules/${moduleId}`);
-      return mod.state === 'locked';
-    } catch { return false; }
-  };
-
-  const runHeadlessAutonext = async (courseData, btn, setStatus) => {
-    const { course } = courseData;
-    const origLabel = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '⏭ walking…';
-    setStatus(`Starting headless autonext for ${course.name}…`, '#a371f7');
-
-    let walked = 0, marked = 0, skipped = 0;
-    let stopReason = null;
-    let stopItem = null;
-    const MAX_STEPS = 200;
-
-    try {
-      const start = await findStartItem(course);
-      if (!start) {
-        stopReason = 'no-pending';
-      } else if (start.blocker === 'heavy') {
-        stopReason = `heavy at start: ${start.item.completion_requirement.type}`;
-        stopItem = start.item;
-      } else {
-        let current = start.item;
-        for (let step = 0; step < MAX_STEPS && current; step++) {
-          walked++;
-          setStatus(`Step ${walked}: ${current.title?.slice(0, 60) || `item ${current.id}`}`, '#79c0ff');
-
-          // Heavy item → stop here, user must handle.
-          if (current.completion_requirement && HEAVY_TYPES.has(current.completion_requirement.type)) {
-            stopReason = `heavy: ${current.completion_requirement.type}`;
-            stopItem = current;
-            break;
-          }
-
-          // Mark quick items completed.
-          try {
-            const r = await completeItem(course.id, current);
-            if (r.ok) marked++;
-            else skipped++;
-          } catch (e) {
-            console.warn('[Autonext] complete failed', e);
-            skipped++;
-          }
-
-          // Find next.
-          const next = await getNextItem(course.id, current.id);
-          if (!next) {
-            // No next via sequence — check if next module is locked.
-            stopReason = 'end-of-chain';
-            break;
-          }
-          if (next.module_id !== current.module_id) {
-            const locked = await moduleIsLocked(course.id, next.module_id);
-            if (locked) {
-              stopReason = 'next-module-locked';
-              stopItem = next;
-              break;
-            }
-          }
-          current = next;
-          // Tiny throttle so we don't burst-hit Canvas.
-          await new Promise(r => setTimeout(r, 200));
-        }
-        if (!stopReason && walked >= MAX_STEPS) stopReason = 'max-steps';
-      }
-    } catch (e) {
-      stopReason = `error: ${e.message}`;
-    }
-
-    btn.disabled = false;
-    btn.textContent = origLabel;
-
-    const summary = `Walked ${walked} · marked ${marked} · skipped ${skipped}`;
-    if (stopReason === 'no-pending') {
-      setStatus(`✓ Nothing to walk — course is already clear.`, '#7ee787');
-    } else if (stopReason === 'end-of-chain') {
-      setStatus(`✓ Reached end of sequence. ${summary}.`, '#7ee787');
-    } else if (stopReason?.startsWith('heavy')) {
-      const t = stopItem?.title || 'unknown item';
-      const url = stopItem?.html_url;
-      setStatus(`⏸ Stopped at "${t}" — needs you (${stopReason}). ${summary}.`, '#ffb84d');
-      if (url) {
-        const status = panel.querySelector('#feu-action-status');
-        if (status) {
-          status.innerHTML += ` <a href="${url}" target="_blank" style="color:#79c0ff;">open</a>`;
-        }
-      }
-    } else if (stopReason === 'next-module-locked') {
-      setStatus(`🔒 Next module is locked. ${summary}.`, '#ff6b6b');
-    } else {
-      setStatus(`Stopped: ${stopReason}. ${summary}.`, '#ff6b6b');
-    }
-
-    // Invalidate dashboard cache so the next render shows fresh state.
-    if (marked > 0) {
-      try { localStorage.removeItem(CACHE_KEY); } catch {}
-    }
   };
 
   // ---------- bootstrap ----------

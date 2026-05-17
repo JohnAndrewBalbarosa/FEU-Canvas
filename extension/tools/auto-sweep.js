@@ -541,7 +541,7 @@
 
   root().innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <strong style="font-size:15px;">🪄 Auto-Sweep</strong>
+      <strong style="font-size:15px;">🚀 Unlock Modules</strong>
       <div style="display:flex;gap:4px;">
         <button id="sw-ai-settings" title="AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">
           ⚙️ AI <span id="sw-ai-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${AI.isConfigured() ? '#7ee787' : '#8b949e'};margin-left:2px;"></span>
@@ -558,15 +558,15 @@
     ${walkerHtml}
 
     <div id="sw-summary" style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;">
-      <div style="font-size:13px;font-weight:600;color:#7ee787;">Quick unlocks: <span id="sw-quick-count">${quickQueue.length}</span></div>
-      <div style="font-size:11px;opacity:.75;margin-top:2px;">Will auto-complete <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_view</code> + <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_mark_done</code> only. Never submits assignments or takes quizzes.</div>
-      <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Manual needed: <span id="sw-manual-count">${manualList.length}</span></div>
-      <div style="font-size:11px;opacity:.75;margin-top:2px;">Discussions, submissions, quizzes — listed below for you to handle.</div>
+      <div style="font-size:13px;font-weight:600;color:#7ee787;">Auto-unlockable: <span id="sw-quick-count">${quickQueue.length}</span></div>
+      <div style="font-size:11px;opacity:.75;margin-top:2px;">Walks every currently-unlocked module in parallel across all favorited courses. Marks <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_view</code> + <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_mark_done</code> via Canvas API, then re-cascades as prereqs flip. Never submits assignments, takes quizzes, or posts discussions.</div>
+      <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Needs you: <span id="sw-manual-count">${manualList.length}</span></div>
+      <div style="font-size:11px;opacity:.75;margin-top:2px;">Submissions, quizzes, discussions — listed below.</div>
     </div>
 
     <div style="display:flex;gap:8px;margin-bottom:12px;">
       <button id="sw-run" ${quickQueue.length ? '' : 'disabled'} style="flex:1;background:${quickQueue.length ? '#1f6feb' : '#30363d'};color:white;border:none;border-radius:6px;padding:8px;cursor:${quickQueue.length ? 'pointer' : 'not-allowed'};font-weight:600;">
-        Run sweep — unlock ${quickQueue.length}
+        🚀 Unlock Modules — ${quickQueue.length} item${quickQueue.length === 1 ? '' : 's'}
       </button>
       <button id="sw-skip" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:8px 14px;cursor:pointer;">View only</button>
     </div>
