@@ -149,8 +149,13 @@
    *                    stopsAtHeavy, stopsSkipped, allResults, stopReason}>}
    */
   const runUnlockModules = async (input, callbacks) => {
-    const { courses, courseById, moduleStateMap } = input;
+    const { courses, courseById, moduleStateMap, targetCourseIds } = input;
     const { log, setProgress, refreshPanel } = callbacks;
+    // Optional scoping: when targetCourseIds is provided, only walk those
+    // courses. Used e.g. after a discussion-reply post to cascade just
+    // that course without touching siblings.
+    const targetSet = targetCourseIds ? new Set(targetCourseIds) : null;
+    const coursesToScan = targetSet ? courses.filter(c => targetSet.has(c.id)) : courses;
 
     const token = csrf();
     const MAX_CYCLES = 8;
@@ -235,7 +240,7 @@
     };
 
     const scanUnlockedIncompleteModules = async () => {
-      const scans = await Promise.all(courses.map(c =>
+      const scans = await Promise.all(coursesToScan.map(c =>
         apiListFresh(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`)
           .catch(() => [])
           .then(modules => ({ course: c, modules }))
@@ -373,7 +378,7 @@
     }
     log(`Refreshing panel from fresh server state…`, '#8b949e');
     try {
-      await refreshPanel(courses.map(c => c.id));
+      await refreshPanel(coursesToScan.map(c => c.id));
       log(`✓ Panel refreshed.`, '#7ee787');
     } catch (e) {
       log(`Panel refresh failed: ${e.message}`, '#ff6b6b');

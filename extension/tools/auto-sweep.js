@@ -46,7 +46,7 @@
   // 4. Wire interactive surfaces. ctx is the shared mutable bag both UI and
   //    engine read/write to.
   const ctx = { courses, courseById, blockers, moduleStateMap };
-  ui.wireReplyButtons(panel);
+  ui.wireReplyButtons(panel, ctx);
   ui.wireDetailsButtons(panel);
   ui.openAiSettings(panel);
   ui.wireRescanButton(panel, ctx);

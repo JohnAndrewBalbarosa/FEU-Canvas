@@ -382,7 +382,7 @@
 
   // -------- Reply panel (per-item, lazy) --------
 
-  const openReplyPanel = async (toggleBtn) => {
+  const openReplyPanel = async (toggleBtn, ctx) => {
     const key = toggleBtn.dataset.key;
     const courseId = toggleBtn.dataset.courseId;
     const topicId = toggleBtn.dataset.topicId;
@@ -475,13 +475,47 @@
           body: JSON.stringify({ message }),
         });
         if (res.ok) {
-          statusEl.textContent = '✅ Posted. Refresh Auto-Sweep to update status.';
-          statusEl.style.color = '#7ee787';
           submitBtn.textContent = '✓ Posted';
           submitBtn.style.background = '#143d2b';
           const itemDiv = document.getElementById(`sw-item-${key}`);
           if (itemDiv) itemDiv.style.opacity = '.5';
           toast('Reply posted.');
+
+          // Auto-refresh + auto-walk THIS course only. Posting a discussion
+          // can only cascade-unlock prereqs in the same course.
+          if (ctx && engine && refreshPanelFromCourses) {
+            const panelRoot = panelEl.closest('#feu-sweep');
+            statusEl.textContent = '✅ Posted. Auto-refreshing and walking newly-unlocked modules in this course…';
+            statusEl.style.color = '#79c0ff';
+            try {
+              await sleep(1200); // give Canvas a beat to register the contribution
+              const cidNum = Number(courseId);
+              await refreshPanelFromCourses(panelRoot, [cidNum], ctx);
+
+              const miniLog = document.createElement('div');
+              miniLog.style.cssText = 'margin-top:8px;font-size:10.5px;font-family:ui-monospace,monospace;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 8px;max-height:160px;overflow:auto;line-height:1.5;';
+              panelEl.appendChild(miniLog);
+              const miniLogger = (msg, color) => {
+                const d = document.createElement('div');
+                d.style.color = color || '#8b949e';
+                d.textContent = msg;
+                miniLog.appendChild(d);
+                miniLog.scrollTop = miniLog.scrollHeight;
+              };
+              const result = await engine.runUnlockModules(
+                { courses: ctx.courses, courseById: ctx.courseById, moduleStateMap: ctx.moduleStateMap, targetCourseIds: [cidNum] },
+                { log: miniLogger, setProgress: () => {}, refreshPanel: (ids) => refreshPanelFromCourses(panelRoot, ids, ctx) },
+              );
+              statusEl.textContent = `✅ Posted + auto-walked ${result.totalDone} item(s) in this course.`;
+              statusEl.style.color = '#7ee787';
+            } catch (e) {
+              statusEl.textContent = `✅ Posted, but auto-walk failed: ${e.message}. Click ↻ Rescan manually.`;
+              statusEl.style.color = '#ffb84d';
+            }
+          } else {
+            statusEl.textContent = '✅ Posted. Refresh Auto-Sweep to update status.';
+            statusEl.style.color = '#7ee787';
+          }
         } else {
           const errText = await res.text().catch(() => '');
           statusEl.textContent = `Failed (${res.status}): ${errText.slice(0, 120)}`;
@@ -562,9 +596,9 @@
     `;
   };
 
-  const wireReplyButtons = (root) => {
+  const wireReplyButtons = (root, ctx) => {
     root.querySelectorAll('.sw-reply-toggle').forEach(btn => {
-      btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn); };
+      btn.onclick = (e) => { e.preventDefault(); openReplyPanel(btn, ctx); };
     });
   };
   const wireDetailsButtons = (root) => {
@@ -586,7 +620,7 @@
     panel.querySelector('#sw-manual-count').textContent = manual;
     panel.querySelector('#sw-header-summary').textContent = `${ctx.courses.length} favorited courses · ${fresh.length} total blockers`;
     panel.querySelector('#sw-blockers').innerHTML = buildBlockersListHtml(fresh);
-    wireReplyButtons(panel.querySelector('#sw-blockers'));
+    wireReplyButtons(panel.querySelector('#sw-blockers'), ctx);
     wireDetailsButtons(panel.querySelector('#sw-blockers'));
     return fresh;
   };
