@@ -164,6 +164,10 @@
 
     const allResults = [];
     const attempted = new Set();
+    // Modules that hit a stop (heavy item or first-item-locked) and made
+    // no progress this run. Retrying them cycles forever because the
+    // blocker is the same — track + skip them on later cycles.
+    const blockedModules = new Set();
     const stopsAtHeavy = [];
     const stopsSkipped = [];
     let cycle = 0, totalWalked = 0, totalDone = 0, totalFailed = 0;
@@ -235,6 +239,9 @@
       if (marked > 0) {
         resume[course.id] = mod.id;
         resumeCache.write(resume);
+      } else if (stop) {
+        // No progress + blocked — don't retry this module next cycle.
+        blockedModules.add(`${course.id}-${mod.id}`);
       }
       return { course, mod, walked, marked, failed, stop };
     };
@@ -250,10 +257,15 @@
         for (const mod of modules) {
           if (mod.state === 'completed') continue;
           if (mod.state === 'locked') continue;
+          if (blockedModules.has(`${course.id}-${mod.id}`)) continue;
           const hasWorkable = (mod.items || []).some(it => {
             const req = it.completion_requirement;
             if (req?.completed) return false;
             if (req && HEAVY_TYPES.has(req.type)) return false;
+            // Skip items we've already attempted this run — if Canvas didn't
+            // flip them to completed (e.g. must_view needing a real page hit,
+            // or repeated 401/403/4xx), retrying them just loops forever.
+            if (attempted.has(`${course.id}-${it.id}`)) return false;
             return true;
           });
           if (!hasWorkable) continue;
