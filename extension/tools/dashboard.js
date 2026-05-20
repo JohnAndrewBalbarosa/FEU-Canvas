@@ -367,7 +367,7 @@
     const quick = allBlockers.filter(b => b.quick).length;
     const manual = allBlockers.length - quick;
     return `
-      <div id="sw-section" style="margin-top:14px;padding-top:14px;border-top:1px solid #30363d;">
+      <div id="sw-section" style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #30363d;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px;flex-wrap:wrap;">
           <strong style="font-size:14px;">🚀 Unlock Modules</strong>
           <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
@@ -398,7 +398,7 @@
           🚀 Run Sweep — walk ${allBlockers.length} blocker${allBlockers.length === 1 ? '' : 's'}
         </button>
 
-        <div id="sw-blockers">${ui.buildBlockersListHtml(allBlockers)}</div>
+        <div id="sw-blockers" style="display:none;"></div>
       </div>
     `;
   };
@@ -450,12 +450,12 @@
         <span style="background:#1f2a3d;border:1px solid #2f4a6e;padding:2px 8px;border-radius:6px;">${totalBlockers} blockers (${quickWins} quick)</span>
       </div>
 
-      <div id="feu-bento" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      ${renderSweepSection(allBlockers, courses)}
+
+      <div id="feu-bento" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px;">
         ${cards || '<div style="grid-column:1/-1;opacity:.7;padding:20px 0;text-align:center;">Nothing pending. Take a break.</div>'}
       </div>
       <div id="feu-modal" style="display:none;"></div>
-
-      ${renderSweepSection(allBlockers, courses)}
     `;
 
     // Wire top-level dashboard buttons
