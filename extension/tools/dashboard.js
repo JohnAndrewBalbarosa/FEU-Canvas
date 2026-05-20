@@ -1,5 +1,15 @@
-// Canvas Unified Dashboard — bento grid of courses with stateful cache.
-// Read-only. Session cookies only. Cache via localStorage (5-min TTL).
+// FEU Canvas — Unified Dashboard.
+//
+// Single panel that hosts BOTH the pending-work bento grid AND the
+// 🚀 Unlock Modules sweep tooling (blockers list, AI settings, Run, Rescan,
+// live logs, per-discussion reply, per-assignment details).
+//
+// Loaded by background.js after the sweep modules
+// (canvas-api → policy → ai-client → engine → ui), so window.FEUSweep.*
+// is already populated when this runs.
+//
+// Read-only browsing of pending work + opt-in actions (sweep / post replies)
+// behind explicit button clicks. Session cookies only.
 
 (async () => {
   const BASE = location.origin;
@@ -7,6 +17,20 @@
   const STALE_CUTOFF = Date.now() - STALE_DAYS * 86400000;
   const CACHE_KEY = 'feuDashCache';
   const CACHE_TTL_MS = 5 * 60 * 1000;
+
+  // Sweep modules are injected before this file. If anything is missing the
+  // user gets a clear error instead of a half-loaded panel.
+  const FEU = window.FEUSweep || {};
+  if (!FEU.api || !FEU.policy || !FEU.ai || !FEU.engine || !FEU.ui) {
+    const tmp = document.createElement('div');
+    tmp.style.cssText = 'position:fixed;top:16px;right:16px;background:#0f1419;color:#ff6b6b;border:1px solid #30363d;border-radius:10px;padding:12px 16px;z-index:999999;font:13px/1.4 ui-sans-serif,system-ui,sans-serif;';
+    tmp.textContent = 'FEU dashboard failed to load — sweep modules missing. Reload the extension at chrome://extensions.';
+    document.body.appendChild(tmp);
+    setTimeout(() => tmp.remove(), 6000);
+    return;
+  }
+  const { engine, ui, policy, ai } = FEU;
+  const { categorize, chip, CAT } = policy;
 
   // ---------- helpers ----------
   const fmt = (d) => {
@@ -28,9 +52,7 @@
     return `${Math.floor(m / 60)}h ago`;
   };
 
-  // fresh=true forces bypass of browser HTTP cache (cache: 'no-store' +
-  // per-request cache-buster). Use when refreshing manually so Canvas can't
-  // hand back a stale assignments/modules snapshot.
+  // fresh=true bypasses the browser HTTP cache (cache: 'no-store' + buster).
   const api = async (path, { fresh = false } = {}) => {
     const out = [];
     const buster = fresh ? `_=${Date.now()}-${Math.random().toString(36).slice(2, 8)}&` : '';
@@ -52,38 +74,7 @@
     return out;
   };
 
-  const TYPE_LABEL = {
-    must_view: 'View',
-    must_mark_done: 'Mark Done',
-    must_contribute: 'Reply',
-    must_submit: 'Submit',
-    min_score: 'Score',
-  };
-  const QUICK = new Set(['must_view', 'must_mark_done']);
-
-  // Category classifier (FEU naming patterns + Canvas item types + points heuristic)
-  const CAT = {
-    SOCIAL: { label: 'Social', color: '#a371f7' },
-    REFLECTION: { label: 'Reflection', color: '#79c0ff' },
-    FORMATIVE: { label: 'Formative', color: '#7ee787' },
-    SUMMATIVE: { label: 'Summative', color: '#ff6b6b' },
-    ACTIVITY: { label: 'Activity', color: '#ffb84d' },
-    READING: { label: 'Reading', color: '#8b949e' },
-  };
-  const categorize = ({ name, itemType, type, points }) => {
-    const t = (name || '').toLowerCase();
-    if (/fellow\s*itammaraw|introduce yourself|introduction discussion|getting to know|\bintro\b/i.test(t)) return CAT.SOCIAL;
-    if (/end of module|wrap.?up|reflection|what.+(learn|takeaway)|module recap|conclusion/i.test(t)) return CAT.REFLECTION;
-    if (/\bsa\s*\d|summative|major exam|prelim|midterm|\bfinal(s|\s*exam|\s*assessment)?\b|\bexam\b/i.test(t)) return CAT.SUMMATIVE;
-    if (/\bfa\s*\d|formative|practice|self.?check|checkup|drill|quiz\s*\d/i.test(t)) return CAT.FORMATIVE;
-    // Fall back by Canvas item type
-    if (itemType === 'Quiz') return points && points >= 50 ? CAT.SUMMATIVE : CAT.FORMATIVE;
-    if (itemType === 'Assignment') return points && points >= 50 ? CAT.SUMMATIVE : CAT.ACTIVITY;
-    if (itemType === 'Discussion' || type === 'must_contribute') return CAT.REFLECTION;
-    if (itemType === 'Page' || itemType === 'File' || type === 'must_view') return CAT.READING;
-    return CAT.ACTIVITY;
-  };
-  const chip = (cat) => `<span style="background:${cat.color}22;color:${cat.color};border:1px solid ${cat.color}55;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;">${cat.label}</span>`;
+  const QUICK = policy.QUICK_TYPES;
 
   // ---------- cache ----------
   const readCache = () => {
@@ -103,6 +94,10 @@
   const clearCache = () => { try { localStorage.removeItem(CACHE_KEY); } catch {} };
 
   // ---------- fetch fresh ----------
+  // Returns { courseData, courses, moduleStateMap }. courseData[i] mirrors the
+  // shape the bento grid expects; engine-derived blockers carry the richer
+  // fields (cat, quick, reqType, contentId, moduleLocked, ...) the sweep UI
+  // helpers consume.
   const fetchFresh = async ({ fresh = false } = {}) => {
     const label = fresh ? '[Dash] HARD refresh (bypassing browser HTTP cache)' : '[Dash] refresh';
     console.log(`%c${label}`, 'color:#79c0ff;font-weight:bold');
@@ -112,20 +107,16 @@
       favs = cards.map(c => ({ id: c.id, name: c.shortName || c.originalName || c.courseCode }));
     }
     const courses = favs.map(c => ({ id: c.id, name: c.name || c.shortName || c.course_code }));
-    if (!courses.length) return [];
+    if (!courses.length) return { courseData: [], courses: [], moduleStateMap: new Map() };
 
-    return await Promise.all(courses.map(async (c) => {
+    const moduleStateMap = new Map();
+
+    const courseData = await Promise.all(courses.map(async (c) => {
       const [assigns, modules] = await Promise.all([
-        // include[]=submission gives us the CURRENT USER's submission record
-        // (workflow_state, attempt count). Without it we'd be looking at
-        // has_submitted_submissions which is course-wide aggregate state and
-        // returns true the moment any single classmate submits.
         api(`/api/v1/courses/${c.id}/assignments?bucket=unsubmitted&order_by=due_at&include[]=submission`, { fresh }).catch(() => []),
         api(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`, { fresh }).catch(() => []),
       ]);
 
-      // Diagnostic log so the user can verify in DevTools console which
-      // assignments came back from the API and what their submission state is.
       if (fresh) {
         console.groupCollapsed(`[Dash] ${c.name} — ${assigns.length} assigns from API (bucket=unsubmitted)`);
         for (const a of assigns) {
@@ -139,9 +130,8 @@
 
       const isUnsubmittedByMe = (a) => {
         const s = a.submission;
-        if (!s) return true;                                  // no submission record yet
+        if (!s) return true;
         if (!s.workflow_state || s.workflow_state === 'unsubmitted') return true;
-        // Edge case: graded but no attempt recorded (instructor placeholder).
         if (s.workflow_state === 'graded' && (s.attempt ?? 0) === 0) return true;
         return false;
       };
@@ -157,32 +147,22 @@
           points: a.points_possible,
           url: a.html_url,
           attempts: a.submission?.attempt ?? 0,
-          allowedAttempts: a.allowed_attempts,             // -1 or null = unlimited
+          allowedAttempts: a.allowed_attempts,
           submissionTypes: a.submission_types || [],
           allowedExtensions: a.allowed_extensions || [],
           workflowState: a.submission?.workflow_state || 'unsubmitted',
         }))
         .sort((x, y) => (new Date(x.due || '9999') - new Date(y.due || '9999')));
 
-      const blockers = [];
       for (const mod of modules) {
-        if (mod.state === 'completed') continue;
-        for (const item of (mod.items || [])) {
-          const req = item.completion_requirement;
-          if (!req || req.completed) continue;
-          blockers.push({
-            moduleName: mod.name,
-            title: item.title,
-            type: req.type,
-            url: item.html_url,
-            itemType: item.type,
-            quick: QUICK.has(req.type),
-          });
-        }
+        moduleStateMap.set(`${c.id}-${mod.id}`, mod.state || 'unlocked');
       }
+      const blockers = engine.apiModulesToBlockers(c, modules);
 
       return { course: c, pending, blockers };
     }));
+
+    return { courseData, courses, moduleStateMap };
   };
 
   // ---------- panel scaffold ----------
@@ -190,7 +170,7 @@
   const panel = document.createElement('div');
   panel.id = 'feu-dash';
   panel.style.cssText = `
-    position:fixed;top:16px;right:16px;width:540px;max-height:88vh;overflow:auto;
+    position:fixed;top:16px;right:16px;width:560px;max-height:88vh;overflow:auto;
     background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:10px;
     box-shadow:0 12px 40px rgba(0,0,0,.5);font-family:ui-sans-serif,system-ui,sans-serif;
     z-index:999999;padding:14px 16px;font-size:13px;line-height:1.4;
@@ -204,8 +184,7 @@
     const now = new Date();
     if (pending.some(p => p.due && new Date(p.due) < now)) return '#ff6b6b';
     if (pending.some(p => p.due && new Date(p.due).toDateString() === now.toDateString())) return '#ffb84d';
-    if (pending.length || true) return '#7ee787';
-    return '#30363d';
+    return '#7ee787';
   };
 
   const renderCard = (d, idx) => {
@@ -255,7 +234,6 @@
       const accent = isOverdue ? '#ff6b6b' : '#7ee787';
       const cat = categorize({ name: p.name, itemType: 'Assignment', points: p.points });
 
-      // Status pill — "Not Started" vs "In Progress" (drafted but not submitted)
       const inProgress = p.attempts > 0 && p.workflowState !== 'submitted' && p.workflowState !== 'graded';
       const pillColor = inProgress ? '#ffb84d' : '#8b949e';
       const pillLabel = inProgress ? 'In Progress' : 'Not Started';
@@ -296,13 +274,12 @@
         <div style="margin-top:6px;">
           ${items.map(b => {
             const accent = b.quick ? '#7ee787' : '#ffb84d';
-            const tag = TYPE_LABEL[b.type] || b.type;
-            const cat = categorize({ name: b.title, itemType: b.itemType, type: b.type });
+            const tag = policy.TYPE_LABEL[b.reqType] || b.reqType;
             return `
               <div style="border-left:3px solid ${accent};padding:5px 10px;margin:3px 0;background:#0d1117;border-radius:0 6px 6px 0;">
                 <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start;">
                   <a href="${b.url}" target="_blank" style="color:#79c0ff;text-decoration:none;font-size:12px;flex:1;">${b.title}</a>
-                  ${chip(cat)}
+                  ${chip(b.cat)}
                 </div>
                 <div style="font-size:10.5px;margin-top:2px;display:flex;justify-content:space-between;opacity:.8;">
                   <span>${b.itemType}</span>
@@ -317,7 +294,7 @@
     return `
       <button id="feu-back" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;margin-bottom:10px;">← All courses</button>
       <div style="font-weight:700;font-size:15px;margin-bottom:8px;">${course.name}</div>
-      <div style="font-size:11px;opacity:.6;margin-bottom:10px;">Results only. To act on these, use 🚀 Unlock Modules at the top.</div>
+      <div style="font-size:11px;opacity:.6;margin-bottom:10px;">Results only. To act on these, use 🚀 Run Sweep at the bottom of the dashboard.</div>
       ${pending.length ? `
         <details style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#7ee787;list-style:none;">
@@ -341,7 +318,7 @@
       const raw = localStorage.getItem('feuLastSweep');
       if (!raw) return null;
       const s = JSON.parse(raw);
-      if (!s?.at || Date.now() - s.at > 60 * 60 * 1000) return null; // only show within 1 hour
+      if (!s?.at || Date.now() - s.at > 60 * 60 * 1000) return null;
       return s;
     } catch { return null; }
   };
@@ -383,7 +360,50 @@
     `;
   };
 
-  const renderMain = (courseData, fetchedAt) => {
+  // Build the merged sweep section (engine UI: AI panel, category chips,
+  // summary, Run/Rescan, blockers, optional walker host). All IDs match what
+  // the sweep ui helpers expect so we can wire them without modification.
+  const renderSweepSection = (allBlockers, courses) => {
+    const quick = allBlockers.filter(b => b.quick).length;
+    const manual = allBlockers.length - quick;
+    return `
+      <div id="sw-section" style="margin-top:14px;padding-top:14px;border-top:1px solid #30363d;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px;flex-wrap:wrap;">
+          <strong style="font-size:14px;">🚀 Unlock Modules</strong>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+            <button id="sw-settings-btn" title="Discussion-reply + AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;gap:5px;">
+              ⚙ Settings
+              <span id="sw-settings-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#8b949e;"></span>
+              <span id="sw-settings-mode" style="opacity:.75;font-size:10px;">Manual</span>
+            </button>
+            <button id="sw-batch-post" title="Post to every discussion blocker matching your Mode + Scope" style="display:none;background:#3d2414;border:1px solid #ffb84d;color:#ffb84d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:600;">⚡ Post to all matching</button>
+            <button id="sw-rescan" title="Rescan all favorited courses (force fresh from Canvas)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">↻ Rescan</button>
+          </div>
+        </div>
+        <div id="sw-settings-panel" style="display:none;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:10px;"></div>
+        <div id="sw-header-summary" style="font-size:11px;opacity:.7;margin-bottom:10px;">${courses.length} favorited courses · ${allBlockers.length} total blockers</div>
+
+        <div id="sw-cat-breakdown" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">${ui.buildCatBreakdownHtml(allBlockers)}</div>
+
+        <div id="sw-walker-host"></div>
+
+        <div id="sw-summary" style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;">
+          <div style="font-size:13px;font-weight:600;color:#7ee787;">Auto-unlockable: <span id="sw-quick-count">${quick}</span></div>
+          <div style="font-size:11px;opacity:.75;margin-top:2px;">Walks every currently-unlocked module in parallel. Marks <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_view</code> + <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_mark_done</code> via Canvas API, then re-cascades as prereqs flip. Never submits assignments, takes quizzes, or posts discussions.</div>
+          <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Needs you: <span id="sw-manual-count">${manual}</span></div>
+          <div style="font-size:11px;opacity:.75;margin-top:2px;">Submissions, quizzes, and discussions — use the buttons in the list below to view details or post discussion replies (with optional AI drafts).</div>
+        </div>
+
+        <button id="sw-run" ${allBlockers.length ? '' : 'disabled'} style="width:100%;background:${allBlockers.length ? '#1f6feb' : '#30363d'};color:white;border:none;border-radius:6px;padding:8px;cursor:${allBlockers.length ? 'pointer' : 'not-allowed'};font-weight:600;margin-bottom:12px;">
+          🚀 Run Sweep — walk ${allBlockers.length} blocker${allBlockers.length === 1 ? '' : 's'}
+        </button>
+
+        <div id="sw-blockers">${ui.buildBlockersListHtml(allBlockers)}</div>
+      </div>
+    `;
+  };
+
+  const renderMain = (courseData, fetchedAt, moduleStateMap) => {
     const sweep = readSweep();
     const totalPending = courseData.reduce((s, d) => s + d.pending.length, 0);
     const totalBlockers = courseData.reduce((s, d) => s + d.blockers.length, 0);
@@ -392,7 +412,6 @@
     const overdue = courseData.reduce((s, d) => s + d.pending.filter(p => p.due && new Date(p.due) < now).length, 0);
     const today = courseData.reduce((s, d) => s + d.pending.filter(p => p.due && new Date(p.due).toDateString() === now.toDateString()).length, 0);
 
-    // Sort: overdue first, then today, then by total pending+blockers, then empty
     const scored = courseData.map((d, idx) => {
       const ov = d.pending.filter(p => p.due && new Date(p.due) < now).length;
       const td = d.pending.filter(p => p.due && new Date(p.due).toDateString() === now.toDateString()).length;
@@ -406,6 +425,11 @@
     const cards = scored.map(s => renderCard(s.d, s.idx)).join('');
     const age = fmtAge(Date.now() - fetchedAt);
 
+    // Flat blocker list across all favorited courses — shared ref so the ui
+    // helpers (rescan, run, refresh) mutate it in place.
+    const allBlockers = courseData.flatMap(d => d.blockers);
+    const courses = courseData.map(d => d.course);
+
     root().innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <strong style="font-size:15px;">FEU Canvas — Pending Work</strong>
@@ -415,12 +439,7 @@
           <button id="feu-close" title="Close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
         </div>
       </div>
-      <div style="font-size:11px;opacity:.7;margin-bottom:10px;">${courseData.length} favorited courses · this dashboard is read-only</div>
-
-      <button id="feu-unlock" style="display:block;width:100%;background:#1f6feb;color:white;border:none;border-radius:8px;padding:9px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:10px;">
-        🚀 Unlock Modules — opens sweep panel
-      </button>
-      <div id="feu-unlock-status" style="font-size:10.5px;opacity:.75;margin:-4px 0 10px;min-height:13px;"></div>
+      <div style="font-size:11px;opacity:.7;margin-bottom:10px;">${courseData.length} favorited courses · pending bento is read-only · sweep section below acts on Canvas</div>
 
       ${renderSweepBanner(sweep)}
 
@@ -435,54 +454,19 @@
         ${cards || '<div style="grid-column:1/-1;opacity:.7;padding:20px 0;text-align:center;">Nothing pending. Take a break.</div>'}
       </div>
       <div id="feu-modal" style="display:none;"></div>
+
+      ${renderSweepSection(allBlockers, courses)}
     `;
 
-    // Wire up
+    // Wire top-level dashboard buttons
     panel.querySelector('#feu-close').onclick = () => panel.remove();
     panel.querySelector('#feu-refresh').onclick = async (ev) => {
       const hard = ev.shiftKey;
       clearCache();
       root().innerHTML = `<div style="opacity:.85;">${hard ? 'HARD refreshing (bypassing all caches)…' : 'Refreshing…'}</div>`;
-      const data = await fetchFresh({ fresh: hard });
-      writeCache(data);
-      renderMain(data, Date.now());
-    };
-
-    // Top-level launcher: ask the bridge to inject the Unlock Modules panel.
-    const unlockBtn = panel.querySelector('#feu-unlock');
-    const unlockStatus = panel.querySelector('#feu-unlock-status');
-    unlockBtn.onclick = () => {
-      unlockBtn.disabled = true;
-      unlockBtn.textContent = '🚀 launching…';
-      unlockStatus.textContent = 'Asking the extension to inject the Unlock Modules panel…';
-      unlockStatus.style.color = '#8b949e';
-      const handler = (ev) => {
-        if (ev.source !== window) return;
-        const data = ev.data;
-        if (!data || data.source !== 'feu' || data.kind !== 'inject-result' || data.tool !== 'auto-sweep') return;
-        window.removeEventListener('message', handler);
-        if (data.ok) {
-          unlockStatus.textContent = '✓ Unlock Modules panel opened. You can close this dashboard.';
-          unlockStatus.style.color = '#7ee787';
-          unlockBtn.textContent = '✓ launched';
-        } else {
-          unlockStatus.textContent = `Failed: ${data.error || 'unknown'}.`;
-          unlockStatus.style.color = '#ff6b6b';
-          unlockBtn.disabled = false;
-          unlockBtn.textContent = '🚀 Unlock Modules — opens sweep panel';
-        }
-      };
-      window.addEventListener('message', handler);
-      window.postMessage({ source: 'feu', action: 'inject', tool: 'auto-sweep' }, '*');
-      setTimeout(() => {
-        if (unlockBtn.disabled && unlockBtn.textContent === '🚀 launching…') {
-          window.removeEventListener('message', handler);
-          unlockStatus.textContent = 'No reply from bridge. Reload the extension at chrome://extensions.';
-          unlockStatus.style.color = '#ff6b6b';
-          unlockBtn.disabled = false;
-          unlockBtn.textContent = '🚀 Unlock Modules — opens sweep panel';
-        }
-      }, 3000);
+      const { courseData: fresh, courses: freshCourses, moduleStateMap: freshMap } = await fetchFresh({ fresh: hard });
+      writeCache(fresh);
+      renderMain(fresh, Date.now(), freshMap);
     };
 
     const sweepBanner = panel.querySelector('#feu-sweep-banner');
@@ -509,13 +493,27 @@
       };
     });
 
+    // Wire the sweep section using existing ui helpers.
+    const courseById = new Map(courses.map(c => [c.id, c]));
+    const ctx = { courses, courseById, blockers: allBlockers, moduleStateMap };
+    ui.wireReplyButtons(panel.querySelector('#sw-blockers'), ctx);
+    ui.wireDetailsButtons(panel.querySelector('#sw-blockers'));
+    ui.openSettings(panel);
+    ui.refreshSettingsBadge(panel);
+    ui.wireBatchPostButton(panel, ctx);
+    ui.wireRescanButton(panel, ctx);
+    ui.wireSweepRun(panel, ctx);
+    ui.mountModulesWalker(panel).catch(e => console.warn('[Dash] walker mount failed', e));
+
     window.FEUData = courseData;
   };
 
   const openModal = (d) => {
     const bento = panel.querySelector('#feu-bento');
     const modal = panel.querySelector('#feu-modal');
+    const sweepSection = panel.querySelector('#sw-section');
     bento.style.display = 'none';
+    if (sweepSection) sweepSection.style.display = 'none';
     modal.style.display = 'block';
     modal.innerHTML = renderModal(d);
 
@@ -523,19 +521,26 @@
       modal.style.display = 'none';
       modal.innerHTML = '';
       bento.style.display = 'grid';
+      if (sweepSection) sweepSection.style.display = 'block';
     };
   };
 
   // ---------- bootstrap ----------
   const cached = readCache();
   if (cached && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
-    renderMain(cached.courseData, cached.fetchedAt);
+    // Cached courseData doesn't include moduleStateMap — rebuild from cached
+    // blockers so rescan/run still work without a hard fetch.
+    const map = new Map();
+    for (const d of cached.courseData) {
+      for (const b of d.blockers) map.set(`${b.courseId}-${b.moduleId}`, b.moduleState || 'unlocked');
+    }
+    renderMain(cached.courseData, cached.fetchedAt, map);
     console.log(`%c[Dash] Loaded from cache (${fmtAge(Date.now() - cached.fetchedAt)})`, 'color:#7ee787');
   } else {
     root().innerHTML = '<div style="opacity:.85;">Loading… iterating favorited courses in parallel…</div>';
-    const fresh = await fetchFresh();
+    const { courseData: fresh, moduleStateMap } = await fetchFresh();
     writeCache(fresh);
-    renderMain(fresh, Date.now());
+    renderMain(fresh, Date.now(), moduleStateMap);
     console.log(`%c[Dash] Fresh fetch complete (${fresh.length} courses)`, 'color:#7ee787');
   }
 })();

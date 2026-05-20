@@ -1,28 +1,32 @@
-// UI layer — everything DOM-shaped.
+// UI helpers for the unified dashboard's "Unlock Modules" section.
 //
 // Depends on: window.FEUSweep.{api, policy, ai, engine}.
 //
-// Public surface:
-//   mountPanel({courses, blockers, moduleStateMap}) → panel element
-//   refreshPanelFromCourses(panel, courseIds, courseById, blockers, moduleStateMap)
-//   wireDetailsButtons(root)
-//   wireReplyButtons(root)
-//   wireAiSettings(panel)
-//   wireRescanButton(panel, courses, courseById, blockers, moduleStateMap)
-//   wireSweepRun(panel, courses, courseById, blockers, moduleStateMap)
+// The dashboard owns the panel container and renders the sweep section IDs
+// (#sw-ai-settings, #sw-ai-dot, #sw-ai-panel, #sw-cat-breakdown,
+//  #sw-header-summary, #sw-quick-count, #sw-manual-count, #sw-rescan,
+//  #sw-run, #sw-blockers, optional #sw-walker-host). These helpers wire
+// buttons and refresh content within that container.
 //
-// Engine never reaches into here — UI subscribes to engine callbacks instead.
+// Public surface (window.FEUSweep.ui):
+//   buildCatBreakdownHtml, buildBlockersListHtml
+//   refreshPanelFromCourses(panel, courseIds, ctx)
+//   wireReplyButtons(root, ctx) / wireDetailsButtons(root)
+//   openAiSettings(panel) / wireRescanButton(panel, ctx) / wireSweepRun(panel, ctx)
+//   mountModulesWalker(panel) — optional, only call on /modules pages
+//   toast(msg, color)
 
 (() => {
   window.FEUSweep = window.FEUSweep || {};
-  const { api, policy, ai, engine } = window.FEUSweep;
-  if (!api || !policy || !ai || !engine) {
-    console.error('[Sweep ui] requires canvas-api.js, policy.js, ai-client.js, engine.js loaded first');
+  const { api, policy, ai, engine, settings } = window.FEUSweep;
+  if (!api || !policy || !ai || !engine || !settings) {
+    console.error('[Sweep ui] requires canvas-api.js, policy.js, settings.js, ai-client.js, engine.js loaded first');
     return;
   }
   const { BASE, sleep, csrf } = api;
   const { TYPE_LABEL, categorize, chip, formatDue, buildDraft } = policy;
   const { PROVIDER_META } = ai;
+  const { MODE_LABEL, SCOPE_LABEL, MODE_DOT_COLOR } = settings;
 
   // -------- Pure HTML builders --------
 
@@ -216,167 +220,201 @@
   // Lazy assignment-detail cache (filled on click).
   const assignmentDetailCache = new Map();
 
-  // -------- Mount: build the panel and inject into the page --------
+  // -------- Optional modules-page walker (rendered into a host the dashboard provides) --------
 
-  const mountPanel = async ({ courses, blockers, moduleStateMap }) => {
-    document.getElementById('feu-sweep')?.remove();
-    const panel = document.createElement('div');
-    panel.id = 'feu-sweep';
-    panel.style.cssText = `
-      position:fixed;top:16px;right:16px;width:560px;max-height:88vh;overflow:auto;
-      background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:10px;
-      box-shadow:0 12px 40px rgba(0,0,0,.5);font-family:ui-sans-serif,system-ui,sans-serif;
-      z-index:999999;padding:14px 16px;font-size:13px;line-height:1.4;
-    `;
-    document.body.appendChild(panel);
-
-    // Optional /modules-page DOM walker
-    let domModules = [], domOpenable = [];
+  const mountModulesWalker = async (panel) => {
+    const host = panel.querySelector('#sw-walker-host');
+    if (!host) return;
     const onModulesPage = /\/courses\/\d+\/modules\b/.test(location.pathname)
       && !!document.querySelector('#context_modules');
-    if (onModulesPage) {
-      await expandCollapsedDOM();
-      domModules = scanDOMModules();
-      for (const m of domModules) {
-        if (m.locked) continue;
-        for (const it of m.items) {
-          if (!it.href || it.complete || it.heavy) continue;
-          domOpenable.push(it);
-        }
+    if (!onModulesPage) return;
+    await expandCollapsedDOM();
+    const domModules = scanDOMModules();
+    let domOpenable = [];
+    for (const m of domModules) {
+      if (m.locked) continue;
+      for (const it of m.items) {
+        if (!it.href || it.complete || it.heavy) continue;
+        domOpenable.push(it);
       }
     }
-
-    const quickQueue = blockers.filter(b => b.quick);
-    const manualList = blockers.filter(b => !b.quick);
-
-    panel.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <strong style="font-size:15px;">🚀 Unlock Modules</strong>
-        <div style="display:flex;gap:4px;">
-          <button id="sw-ai-settings" title="AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">
-            ⚙️ AI <span id="sw-ai-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${ai.isConfigured() ? '#7ee787' : '#8b949e'};margin-left:2px;"></span>
-          </button>
-          <button id="sw-rescan" title="Rescan all favorited courses (force fresh from Canvas)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">↻ Rescan</button>
-          <button id="sw-close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
-        </div>
-      </div>
-      <div id="sw-ai-panel" style="display:none;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;"></div>
-      <div id="sw-header-summary" style="font-size:11px;opacity:.7;margin-bottom:10px;">${courses.length} favorited courses · ${blockers.length} total blockers</div>
-
-      <div id="sw-cat-breakdown" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">${buildCatBreakdownHtml(blockers)}</div>
-
-      ${buildWalkerHtml(domModules, domOpenable)}
-
-      <div id="sw-summary" style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px;margin-bottom:10px;">
-        <div style="font-size:13px;font-weight:600;color:#7ee787;">Auto-unlockable: <span id="sw-quick-count">${quickQueue.length}</span></div>
-        <div style="font-size:11px;opacity:.75;margin-top:2px;">Walks every currently-unlocked module in parallel across all favorited courses. Marks <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_view</code> + <code style="background:#161b22;padding:1px 4px;border-radius:3px;">must_mark_done</code> via Canvas API, then re-cascades as prereqs flip. Never submits assignments, takes quizzes, or posts discussions.</div>
-        <div style="font-size:13px;font-weight:600;color:#ffb84d;margin-top:8px;">Needs you: <span id="sw-manual-count">${manualList.length}</span></div>
-        <div style="font-size:11px;opacity:.75;margin-top:2px;">Submissions, quizzes, discussions — listed below.</div>
-      </div>
-
-      <div style="display:flex;gap:8px;margin-bottom:12px;">
-        <button id="sw-run" ${blockers.length ? '' : 'disabled'} style="flex:1;background:${blockers.length ? '#1f6feb' : '#30363d'};color:white;border:none;border-radius:6px;padding:8px;cursor:${blockers.length ? 'pointer' : 'not-allowed'};font-weight:600;">
-          🚀 Unlock Modules — walk ${blockers.length} blocker${blockers.length === 1 ? '' : 's'}
-        </button>
-        <button id="sw-skip" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:8px 14px;cursor:pointer;">View only</button>
-      </div>
-
-      <div id="sw-blockers">${buildBlockersListHtml(blockers)}</div>
-    `;
-
-    panel.querySelector('#sw-close').onclick = () => panel.remove();
-    panel.querySelector('#sw-skip').onclick = () => panel.remove();
-
-    // Walker "open in tabs" button (only present when on a /modules page)
-    const walkOpenBtn = panel.querySelector('#sw-walk-open');
-    if (walkOpenBtn) {
-      walkOpenBtn.onclick = () => {
-        const OPEN_CHUNK = 25;
-        const batch = domOpenable.slice(0, OPEN_CHUNK);
-        let opened = 0;
-        for (const it of batch) {
-          if (window.open(it.href, '_blank', 'noopener')) opened++;
-        }
-        walkOpenBtn.textContent = `✓ opened ${opened}`;
-        walkOpenBtn.style.background = '#143d2b';
-        domOpenable = domOpenable.slice(OPEN_CHUNK);
-        if (domOpenable.length) {
-          setTimeout(() => {
-            walkOpenBtn.disabled = false;
-            walkOpenBtn.style.background = '#1f6feb';
-            walkOpenBtn.style.cursor = 'pointer';
-            walkOpenBtn.textContent = `Open next ${Math.min(domOpenable.length, OPEN_CHUNK)}${domOpenable.length > OPEN_CHUNK ? ` of ${domOpenable.length}` : ''}`;
-          }, 1200);
-        } else {
-          walkOpenBtn.disabled = true;
-        }
-      };
-    }
-
-    return panel;
+    host.innerHTML = buildWalkerHtml(domModules, domOpenable);
+    const walkOpenBtn = host.querySelector('#sw-walk-open');
+    if (!walkOpenBtn) return;
+    const OPEN_CHUNK = 25;
+    walkOpenBtn.onclick = () => {
+      const batch = domOpenable.slice(0, OPEN_CHUNK);
+      let opened = 0;
+      for (const it of batch) {
+        if (window.open(it.href, '_blank', 'noopener')) opened++;
+      }
+      walkOpenBtn.textContent = `✓ opened ${opened}`;
+      walkOpenBtn.style.background = '#143d2b';
+      domOpenable = domOpenable.slice(OPEN_CHUNK);
+      if (domOpenable.length) {
+        setTimeout(() => {
+          walkOpenBtn.disabled = false;
+          walkOpenBtn.style.background = '#1f6feb';
+          walkOpenBtn.style.cursor = 'pointer';
+          walkOpenBtn.textContent = `Open next ${Math.min(domOpenable.length, OPEN_CHUNK)}${domOpenable.length > OPEN_CHUNK ? ` of ${domOpenable.length}` : ''}`;
+        }, 1200);
+      } else {
+        walkOpenBtn.disabled = true;
+      }
+    };
   };
 
-  // -------- AI settings panel --------
+  // -------- Settings panel (Discussion replies + AI provider) --------
 
-  const openAiSettings = (panel) => {
-    const aiPanel = panel.querySelector('#sw-ai-panel');
-    const aiDot = panel.querySelector('#sw-ai-dot');
+  const SECTION_TITLE_CSS = 'font-size:11px;font-weight:700;color:#79c0ff;letter-spacing:.5px;text-transform:uppercase;margin:0 0 6px;';
+  const FIELD_LABEL_CSS  = 'display:block;font-size:11px;color:#c9d1d9;margin:8px 0 4px;';
+  const HINT_CSS         = 'font-size:10.5px;opacity:.6;margin-top:3px;line-height:1.4;';
+  const INPUT_CSS        = 'width:100%;background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font:inherit;font-size:12px;box-sizing:border-box;';
+
+  const refreshSettingsBadge = (panel) => {
+    const cfg = settings.get();
+    const dot = panel.querySelector('#sw-settings-dot');
+    const label = panel.querySelector('#sw-settings-mode');
+    if (dot) dot.style.background = MODE_DOT_COLOR[cfg.mode] || '#8b949e';
+    if (label) label.textContent = MODE_LABEL[cfg.mode]?.split(' ')[0] || cfg.mode;
+  };
+
+  const openSettings = (panel) => {
+    const settingsPanel = panel.querySelector('#sw-settings-panel');
     const render = () => {
-      const cfg = ai.getConfig();
-      const provider = cfg.provider || 'openai';
+      const reply = settings.get();
+      const aiCfg = ai.getConfig();
+      const provider = aiCfg.provider || 'openai';
       const meta = PROVIDER_META[provider];
-      aiPanel.innerHTML = `
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px;">AI provider settings</div>
-        <div style="font-size:10.5px;opacity:.65;margin-bottom:8px;">Stored locally in your browser. Used only when you click "Generate draft".</div>
-        <label style="display:block;font-size:11px;margin-bottom:4px;">Provider</label>
-        <select id="sw-ai-provider" style="width:100%;background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:5px;font:inherit;font-size:12px;margin-bottom:8px;">
+      const aiReady = ai.isConfigured();
+      const aiNeeded = reply.mode === 'ai' || reply.mode === 'auto';
+      const aiWarn = aiNeeded && !aiReady
+        ? `<div style="margin-top:6px;padding:6px 8px;background:#3d3414;border:1px solid #6e5a22;border-radius:5px;color:#ffb84d;font-size:11px;">⚠ AI provider not configured — set one below or switch mode to Template / Manual.</div>`
+        : '';
+
+      settingsPanel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h4 style="${SECTION_TITLE_CSS}margin:0;">💬 Discussion reply</h4>
+          <button id="sw-set-close" title="Close settings" style="background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">×</button>
+        </div>
+        <div style="${HINT_CSS}margin-bottom:6px;">Controls how the extension fills in (and optionally batch-posts) discussion replies surfaced by the sweep.</div>
+
+        <label style="${FIELD_LABEL_CSS}">Mode</label>
+        <select id="sw-set-mode" style="${INPUT_CSS}">
+          ${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${reply.mode === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+        <div style="${HINT_CSS}">
+          <b>Manual</b> — type your own. <b>Template</b> — drops the text below into the box.
+          <b>AI</b> — generates a reflection with your configured provider.
+          <b>Auto</b> — AI for reflection-style topics, template for everything else.
+        </div>
+
+        <label style="${FIELD_LABEL_CSS}">Scope</label>
+        <select id="sw-set-scope" style="${INPUT_CSS}">
+          ${Object.entries(SCOPE_LABEL).map(([k, v]) => `<option value="${k}" ${reply.scope === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+        <div style="${HINT_CSS}">Which discussion blockers the mode above applies to.</div>
+
+        <label style="${FIELD_LABEL_CSS}">Template text</label>
+        <textarea id="sw-set-template" rows="2" placeholder="." style="${INPUT_CSS}resize:vertical;min-height:36px;">${(reply.template || '').replace(/</g, '&lt;')}</textarea>
+        <div style="${HINT_CSS}">Used in Template / Auto mode. A single "." works for teachers who only require <i>any</i> reply to unlock the next module.</div>
+
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;cursor:pointer;">
+            <input id="sw-set-autofill" type="checkbox" ${reply.autoFill ? 'checked' : ''} style="margin:0;">
+            Auto-fill the textarea when I open a reply panel
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;cursor:pointer;">
+            <input id="sw-set-allowshort" type="checkbox" ${reply.allowShort ? 'checked' : ''} style="margin:0;">
+            Allow short replies (skip the 30-character minimum)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;cursor:pointer;color:#ffb84d;">
+            <input id="sw-set-batch" type="checkbox" ${reply.autoPostBatch ? 'checked' : ''} style="margin:0;">
+            Enable "Post to all matching" batch button <span style="opacity:.7;">(posts without per-item review)</span>
+          </label>
+        </div>
+
+        <hr style="border:none;border-top:1px solid #30363d;margin:14px 0 10px;">
+
+        <h4 style="${SECTION_TITLE_CSS}">⚙ AI provider <span id="sw-ai-state" style="font-weight:400;color:${aiReady ? '#7ee787' : '#8b949e'};letter-spacing:0;text-transform:none;">${aiReady ? `· ${provider}/${aiCfg.model}` : '· not configured'}</span></h4>
+        ${aiWarn}
+        <label style="${FIELD_LABEL_CSS}">Provider</label>
+        <select id="sw-ai-provider" style="${INPUT_CSS}">
           ${Object.entries(PROVIDER_META).map(([key, m]) => `<option value="${key}" ${provider === key ? 'selected' : ''}>${m.label}</option>`).join('')}
         </select>
-        <label style="display:block;font-size:11px;margin-bottom:4px;">Model</label>
-        <input id="sw-ai-model" type="text" value="${cfg.model || ''}" placeholder="${meta.placeholder}" style="width:100%;background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:5px 8px;font:inherit;font-size:12px;margin-bottom:8px;box-sizing:border-box;">
-        <label style="display:block;font-size:11px;margin-bottom:4px;">API key</label>
-        <input id="sw-ai-key" type="password" value="${cfg.apiKey || ''}" placeholder="${meta.keyHint}" style="width:100%;background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:5px 8px;font:inherit;font-size:12px;margin-bottom:10px;box-sizing:border-box;">
-        <div style="display:flex;gap:6px;">
-          <button id="sw-ai-save" style="flex:1;background:#1f6feb;color:white;border:none;border-radius:5px;padding:6px;cursor:pointer;font-size:11px;font-weight:600;">Save</button>
-          <button id="sw-ai-clear" style="background:transparent;border:1px solid #6e2222;color:#ff6b6b;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:11px;">Clear</button>
-          <button id="sw-ai-cancel" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:5px;padding:6px 10px;cursor:pointer;font-size:11px;">Close</button>
+        <label style="${FIELD_LABEL_CSS}">Model</label>
+        <input id="sw-ai-model" type="text" value="${aiCfg.model || ''}" placeholder="${meta.placeholder}" style="${INPUT_CSS}">
+        <label style="${FIELD_LABEL_CSS}">API key</label>
+        <input id="sw-ai-key" type="password" value="${aiCfg.apiKey || ''}" placeholder="${meta.keyHint}" style="${INPUT_CSS}">
+        <div style="${HINT_CSS}">Stored only in this browser's localStorage. Calls go directly from your browser to the provider — never to FEU.</div>
+
+        <div style="display:flex;gap:6px;margin-top:14px;">
+          <button id="sw-set-save" style="flex:1;background:#1f6feb;color:white;border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:12px;font-weight:600;">Save settings</button>
+          <button id="sw-set-reset" style="background:transparent;border:1px solid #6e2222;color:#ff6b6b;border-radius:6px;padding:7px 10px;cursor:pointer;font-size:11px;">Reset reply</button>
+          <button id="sw-ai-clear" style="background:transparent;border:1px solid #6e2222;color:#ff6b6b;border-radius:6px;padding:7px 10px;cursor:pointer;font-size:11px;">Clear AI</button>
         </div>
-        <div id="sw-ai-status" style="font-size:10.5px;margin-top:6px;min-height:13px;opacity:.85;"></div>
+        <div id="sw-set-status" style="font-size:10.5px;margin-top:8px;min-height:13px;opacity:.85;"></div>
       `;
-      const providerSel = aiPanel.querySelector('#sw-ai-provider');
-      const modelInput = aiPanel.querySelector('#sw-ai-model');
-      const keyInput = aiPanel.querySelector('#sw-ai-key');
-      const status = aiPanel.querySelector('#sw-ai-status');
+
+      const $ = (sel) => settingsPanel.querySelector(sel);
+      const status = $('#sw-set-status');
+      const providerSel = $('#sw-ai-provider');
+      const modelInput = $('#sw-ai-model');
+      const keyInput = $('#sw-ai-key');
+
       providerSel.onchange = () => {
-        modelInput.placeholder = PROVIDER_META[providerSel.value].placeholder;
-        keyInput.placeholder = PROVIDER_META[providerSel.value].keyHint;
+        const m = PROVIDER_META[providerSel.value];
+        modelInput.placeholder = m.placeholder;
+        keyInput.placeholder = m.keyHint;
       };
-      aiPanel.querySelector('#sw-ai-save').onclick = () => {
-        const cfg = { provider: providerSel.value, model: modelInput.value.trim(), apiKey: keyInput.value.trim() };
-        if (!cfg.model || !cfg.apiKey) {
-          status.textContent = 'Both model and API key required.';
-          status.style.color = '#ff6b6b';
-          return;
-        }
-        ai.setConfig(cfg);
-        aiDot.style.background = '#7ee787';
+      $('#sw-set-close').onclick = () => { settingsPanel.style.display = 'none'; };
+
+      $('#sw-set-save').onclick = () => {
+        settings.set({
+          mode: $('#sw-set-mode').value,
+          scope: $('#sw-set-scope').value,
+          template: $('#sw-set-template').value,
+          autoFill: $('#sw-set-autofill').checked,
+          allowShort: $('#sw-set-allowshort').checked,
+          autoPostBatch: $('#sw-set-batch').checked,
+        });
+        const aiPatch = {
+          provider: providerSel.value,
+          model: modelInput.value.trim(),
+          apiKey: keyInput.value.trim(),
+        };
+        if (aiPatch.model && aiPatch.apiKey) ai.setConfig(aiPatch);
+
+        refreshSettingsBadge(panel);
+        const batchBtn = panel.querySelector('#sw-batch-post');
+        if (batchBtn) batchBtn.style.display = settings.get().autoPostBatch ? '' : 'none';
+
         status.textContent = '✓ Saved.';
         status.style.color = '#7ee787';
-        setTimeout(() => { aiPanel.style.display = 'none'; }, 600);
+        setTimeout(() => { settingsPanel.style.display = 'none'; }, 700);
       };
-      aiPanel.querySelector('#sw-ai-clear').onclick = () => {
-        if (confirm('Clear stored AI config?')) {
-          ai.clearConfig();
-          aiDot.style.background = '#8b949e';
-          render();
-          status.textContent = 'Cleared.';
-        }
+
+      $('#sw-set-reset').onclick = () => {
+        if (!confirm('Reset discussion-reply settings to defaults?')) return;
+        settings.reset();
+        refreshSettingsBadge(panel);
+        render();
+        status.textContent = 'Reply settings reset.';
+        status.style.color = '#ffb84d';
       };
-      aiPanel.querySelector('#sw-ai-cancel').onclick = () => { aiPanel.style.display = 'none'; };
+
+      $('#sw-ai-clear').onclick = () => {
+        if (!confirm('Clear the stored AI provider, model, and API key?')) return;
+        ai.clearConfig();
+        render();
+        status.textContent = 'AI provider cleared.';
+        status.style.color = '#ffb84d';
+      };
     };
-    panel.querySelector('#sw-ai-settings').onclick = () => {
-      if (aiPanel.style.display === 'none') { render(); aiPanel.style.display = 'block'; }
-      else aiPanel.style.display = 'none';
+
+    panel.querySelector('#sw-settings-btn').onclick = () => {
+      if (settingsPanel.style.display === 'none') { render(); settingsPanel.style.display = 'block'; }
+      else settingsPanel.style.display = 'none';
     };
   };
 
@@ -406,13 +444,25 @@
       if (res.ok) { const data = await res.json(); promptText = stripHtml(data.message).slice(0, 800); }
     } catch (e) { console.warn('[Sweep] prompt fetch failed', e); }
 
+    const plan = settings.planFill({ title });
+    const replyCfg = settings.get();
+    const planBadge = {
+      ai:       { text: '✨ AI mode — click "Generate draft" to fill', color: '#a371f7' },
+      template: { text: `📋 Template mode — pre-filled with your saved template`, color: '#ffb84d' },
+      manual:   { text: '✍ Manual mode — write your own reply', color: '#8b949e' },
+    }[plan.source];
+
     panelEl.innerHTML = `
       <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Discussion prompt</div>
       <div style="font-size:11.5px;line-height:1.45;background:#161b22;padding:8px 10px;border-radius:6px;max-height:160px;overflow:auto;margin-bottom:10px;color:#c9d1d9;">${promptText || '(no prompt text)'}</div>
-      <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Your reply</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px;">
+        <span style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;">Your reply</span>
+        <span style="font-size:10px;color:${planBadge.color};opacity:.9;">${planBadge.text}</span>
+      </div>
       <textarea class="sw-reply-text" placeholder="Read the prompt above, then write your own reflection…" style="width:100%;min-height:100px;background:#0f1419;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:8px;font:inherit;font-size:12px;line-height:1.45;resize:vertical;box-sizing:border-box;"></textarea>
-      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
-        <button class="sw-gen-draft" style="background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;">✨ Generate draft (then edit)</button>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        <button class="sw-gen-draft" style="background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;">✨ Generate AI draft</button>
+        <button class="sw-fill-template" style="background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;">📋 Use template</button>
         <button class="sw-submit" style="background:#1f6feb;color:white;border:none;border-radius:5px;padding:5px 12px;cursor:pointer;font-size:11px;font-weight:600;margin-left:auto;">Post reply</button>
       </div>
       <div class="sw-reply-status" style="font-size:10.5px;margin-top:6px;min-height:13px;opacity:.8;"></div>
@@ -420,6 +470,29 @@
 
     const textarea = panelEl.querySelector('.sw-reply-text');
     const statusEl = panelEl.querySelector('.sw-reply-status');
+
+    // Apply auto-fill based on settings.
+    if (plan.source === 'template' && plan.text != null) {
+      textarea.value = plan.text;
+      statusEl.textContent = `Template inserted. Edit before posting if you want.`;
+      statusEl.style.color = '#ffb84d';
+    } else if (plan.source === 'ai' && replyCfg.autoFill && ai.isConfigured()) {
+      // Kick off generation in the background — user can still edit/cancel.
+      statusEl.textContent = '⏳ Generating AI draft…';
+      statusEl.style.color = '#a371f7';
+      const sys = "You are helping a Filipino college student write an authentic 'end of module' reflection for an online discussion in Canvas. Output 3 to 4 sentences in first-person English. Reference one specific concept from the prompt. Keep it natural and student-like — no formal academic phrasing, no bullet points, no headings. Do not include a salutation or signature.";
+      const usr = `Discussion title: ${title}\n\nDiscussion prompt:\n${promptText}\n\nWrite a brief reflection.`;
+      ai.generate({ system: sys, user: usr, maxTokens: 400 })
+        .then((out) => {
+          if (!textarea.value) textarea.value = out;
+          statusEl.textContent = '✨ AI draft inserted. Edit to match your voice before posting.';
+          statusEl.style.color = '#a371f7';
+        })
+        .catch((e) => {
+          statusEl.textContent = `AI error: ${e.message}. You can still type manually or use the template.`;
+          statusEl.style.color = '#ff6b6b';
+        });
+    }
     panelEl.querySelector('.sw-gen-draft').onclick = async () => {
       const btn = panelEl.querySelector('.sw-gen-draft');
       const originalLabel = btn.textContent;
@@ -451,10 +524,25 @@
       }
     };
 
+    panelEl.querySelector('.sw-fill-template').onclick = () => {
+      const tpl = settings.get().template || '.';
+      textarea.value = tpl;
+      textarea.focus();
+      statusEl.textContent = 'Template inserted.';
+      statusEl.style.color = '#ffb84d';
+    };
+
     panelEl.querySelector('.sw-submit').onclick = async () => {
       const message = textarea.value.trim();
-      if (message.length < 30) {
-        statusEl.textContent = 'Reply seems too short (min 30 chars). Add more thought.';
+      const cfgNow = settings.get();
+      const minOk = cfgNow.allowShort || message.length >= 30;
+      if (!message) {
+        statusEl.textContent = 'Reply is empty.';
+        statusEl.style.color = '#ff6b6b';
+        return;
+      }
+      if (!minOk) {
+        statusEl.textContent = 'Reply seems too short (min 30 chars). Enable "Allow short replies" in ⚙ Settings to bypass.';
         statusEl.style.color = '#ff6b6b';
         return;
       }
@@ -607,6 +695,137 @@
     });
   };
 
+  // -------- Batch post (Template / AI for every matching discussion blocker) --------
+
+  const postSingleReply = async ({ courseId, topicId, message }) => {
+    const res = await fetch(`${BASE}/api/v1/courses/${courseId}/discussion_topics/${topicId}/entries`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'X-CSRF-Token': csrf(),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: JSON.stringify({ message }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`${res.status}: ${errText.slice(0, 120)}`);
+    }
+    return true;
+  };
+
+  const fetchDiscussionPrompt = async ({ courseId, topicId }) => {
+    try {
+      const res = await fetch(`${BASE}/api/v1/courses/${courseId}/discussion_topics/${topicId}`, {
+        credentials: 'include', headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) return '';
+      const data = await res.json();
+      return stripHtml(data.message).slice(0, 800);
+    } catch { return ''; }
+  };
+
+  const buildPlannedReplies = async (blockers) => {
+    const cfg = settings.get();
+    const out = [];
+    for (const b of blockers) {
+      const replyable = (b.reqType === 'must_contribute' || b.itemType === 'Discussion')
+        && b.contentId && !b.moduleLocked;
+      if (!replyable) continue;
+      const plan = settings.planFill({ title: b.title });
+      if (plan.source === 'manual') continue;
+      out.push({ b, plan, cfg });
+    }
+    return out;
+  };
+
+  const wireBatchPostButton = (panel, ctx) => {
+    const btn = panel.querySelector('#sw-batch-post');
+    if (!btn) return;
+    if (!settings.get().autoPostBatch) { btn.style.display = 'none'; return; }
+    btn.style.display = '';
+
+    btn.onclick = async () => {
+      const targets = await buildPlannedReplies(ctx.blockers);
+      if (!targets.length) {
+        toast('No discussion blockers match your current Mode + Scope.', '#ffb84d');
+        return;
+      }
+      const cfg = settings.get();
+      const aiCount = targets.filter(t => t.plan.source === 'ai').length;
+      const tplCount = targets.length - aiCount;
+      const ok = confirm(
+        `Post to ${targets.length} discussion${targets.length === 1 ? '' : 's'} right now?\n` +
+        `  • ${tplCount} via template (${(cfg.template || '.').slice(0, 30)})\n` +
+        `  • ${aiCount} via AI-generated draft\n\n` +
+        `This will hit Canvas immediately and cannot be undone from here.`
+      );
+      if (!ok) return;
+
+      const logBox = document.createElement('div');
+      logBox.style.cssText = 'margin-top:8px;font-size:10.5px;font-family:ui-monospace,monospace;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;max-height:240px;overflow:auto;line-height:1.5;';
+      btn.parentElement.appendChild(logBox);
+      const log = (msg, color) => {
+        const d = document.createElement('div');
+        d.style.color = color || '#8b949e';
+        d.textContent = msg;
+        logBox.appendChild(d);
+        logBox.scrollTop = logBox.scrollHeight;
+      };
+
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = `Posting 0 / ${targets.length}…`;
+      let ok2 = 0, fail = 0;
+      const affectedCourses = new Set();
+
+      for (let i = 0; i < targets.length; i++) {
+        const { b, plan } = targets[i];
+        btn.textContent = `Posting ${i + 1} / ${targets.length}…`;
+        try {
+          let message;
+          if (plan.source === 'template') {
+            message = plan.text || cfg.template || '.';
+          } else {
+            // AI
+            if (!ai.isConfigured()) throw new Error('AI not configured');
+            const prompt = await fetchDiscussionPrompt({ courseId: b.courseId, topicId: b.contentId });
+            const sys = "You are helping a Filipino college student write an authentic 'end of module' reflection for an online discussion in Canvas. Output 3 to 4 sentences in first-person English. Reference one specific concept from the prompt. Keep it natural and student-like — no formal academic phrasing, no bullet points, no headings. Do not include a salutation or signature.";
+            const usr = `Discussion title: ${b.title}\n\nDiscussion prompt:\n${prompt}\n\nWrite a brief reflection.`;
+            message = await ai.generate({ system: sys, user: usr, maxTokens: 400 });
+          }
+          await postSingleReply({ courseId: b.courseId, topicId: b.contentId, message });
+          ok2++;
+          affectedCourses.add(b.courseId);
+          log(`✓ ${b.courseName} · ${b.title}  [${plan.source}]`, '#7ee787');
+        } catch (e) {
+          fail++;
+          log(`✗ ${b.courseName} · ${b.title}  — ${e.message}`, '#ff6b6b');
+        }
+        await sleep(400);
+      }
+
+      btn.textContent = `✓ Posted ${ok2}${fail ? ` · ${fail} failed` : ''}`;
+      btn.style.background = fail ? '#3d3414' : '#143d2b';
+      toast(`Batch reply: ${ok2} posted${fail ? ` · ${fail} failed` : ''}.`, fail ? '#ffb84d' : '#7ee787');
+
+      // Refresh the affected courses so unlocked items disappear.
+      if (affectedCourses.size && ctx) {
+        try {
+          await sleep(1200);
+          await refreshPanelFromCourses(panel, [...affectedCourses], ctx);
+          log(`↻ Rescanned ${affectedCourses.size} course(s)`, '#79c0ff');
+        } catch (e) {
+          log(`Rescan failed: ${e.message}`, '#ffb84d');
+        }
+      }
+
+      setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = ''; }, 4000);
+    };
+  };
+
   // -------- Panel refresh after sweep / on rescan --------
 
   const refreshPanelFromCourses = async (panel, courseIds, ctx) => {
@@ -690,11 +909,16 @@
   };
 
   window.FEUSweep.ui = {
-    mountPanel,
+    buildCatBreakdownHtml, buildBlockersListHtml,
     refreshPanelFromCourses,
     openReplyPanel, openDetailsPanel,
     wireReplyButtons, wireDetailsButtons,
-    openAiSettings, wireRescanButton, wireSweepRun,
+    openSettings, refreshSettingsBadge,
+    wireBatchPostButton,
+    wireRescanButton, wireSweepRun,
+    mountModulesWalker,
     toast,
+    // Backwards-compat for older dashboards expecting the AI-only entry point.
+    openAiSettings: openSettings,
   };
 })();

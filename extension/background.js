@@ -1,43 +1,37 @@
-// Service worker. Bridges in-page requests (forwarded through bridge.js) to
-// chrome.scripting so tools can be launched from inside other injected tools.
-// Currently used by the Pending Dashboard to fire up Auto-Sweep without
-// requiring the user to round-trip through the popup.
+// Service worker — single responsibility: when the toolbar icon is clicked,
+// inject the unified dashboard (with its sweep modules pre-loaded) into the
+// active Canvas tab. No popup, no in-page message bridge.
 
-// Keep in sync with popup.js FILE_MAP — array values inject in order.
-const INJECTABLE = {
-  'auto-sweep': [
-    'tools/sweep/canvas-api.js',
-    'tools/sweep/policy.js',
-    'tools/sweep/ai-client.js',
-    'tools/sweep/engine.js',
-    'tools/sweep/ui.js',
-    'tools/auto-sweep.js',
-  ],
-};
+const DASHBOARD_FILES = [
+  'tools/sweep/canvas-api.js',
+  'tools/sweep/policy.js',
+  'tools/sweep/settings.js',
+  'tools/sweep/ai-client.js',
+  'tools/sweep/engine.js',
+  'tools/sweep/ui.js',
+  'tools/dashboard.js',
+];
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.source !== 'feu') return;
-  const tabId = sender.tab?.id;
-  if (!tabId) {
-    sendResponse({ ok: false, error: 'no tab id' });
+const isCanvasTab = (url) => !!url && /^https:\/\/([^/]+\.)?instructure\.com\//.test(url);
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab?.id) return;
+  if (!isCanvasTab(tab.url)) {
+    chrome.action.setBadgeText({ tabId: tab.id, text: '!' });
+    chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: '#6e2222' });
+    setTimeout(() => chrome.action.setBadgeText({ tabId: tab.id, text: '' }), 4000);
     return;
   }
-
-  if (msg.action === 'inject') {
-    const entry = INJECTABLE[msg.tool];
-    if (!entry) {
-      sendResponse({ ok: false, error: `unknown tool: ${msg.tool}` });
-      return;
-    }
-    const files = Array.isArray(entry) ? entry : [entry];
-    chrome.scripting.executeScript({
-      target: { tabId },
-      files,
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: DASHBOARD_FILES,
       world: 'MAIN',
-    }).then(
-      () => sendResponse({ ok: true }),
-      (err) => sendResponse({ ok: false, error: err?.message || String(err) }),
-    );
-    return true; // keep channel open for async sendResponse
+    });
+    chrome.action.setBadgeText({ tabId: tab.id, text: '' });
+  } catch (err) {
+    console.error('[FEU] dashboard inject failed', err);
+    chrome.action.setBadgeText({ tabId: tab.id, text: 'err' });
+    chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: '#6e2222' });
   }
 });
