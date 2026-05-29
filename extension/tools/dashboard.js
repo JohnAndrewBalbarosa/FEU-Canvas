@@ -370,16 +370,9 @@
       <div id="sw-section" style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #30363d;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px;flex-wrap:wrap;">
           <strong style="font-size:14px;">🚀 Unlock Modules</strong>
-          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
-            <button id="sw-settings-btn" title="Discussion-reply + AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;gap:5px;">
-              ⚙ Settings
-              <span id="sw-settings-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#8b949e;"></span>
-              <span id="sw-settings-mode" style="opacity:.75;font-size:10px;">Manual</span>
-            </button>
-            <button id="sw-batch-post" title="Post to every discussion blocker matching your Mode + Scope" style="display:none;background:#3d2414;border:1px solid #ffb84d;color:#ffb84d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:600;">⚡ Post to all matching</button>
-            <button id="sw-rescan" title="Rescan all favorited courses (force fresh from Canvas)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">↻ Rescan</button>
-          </div>
+          <button id="sw-batch-post" title="Post to every discussion blocker matching your Mode + Scope" style="display:none;background:#3d2414;border:1px solid #ffb84d;color:#ffb84d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:600;">⚡ Post to all matching</button>
         </div>
+        <button id="sw-rescan" style="display:none;"></button>
         <div id="sw-settings-panel" style="display:none;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:10px;"></div>
         <div id="sw-header-summary" style="font-size:11px;opacity:.7;margin-bottom:10px;">${courses.length} favorited courses · ${allBlockers.length} total blockers</div>
 
@@ -433,9 +426,14 @@
     root().innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <strong style="font-size:15px;">FEU Canvas — Pending Work</strong>
-        <div style="display:flex;gap:4px;align-items:center;">
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
           <span style="font-size:10px;opacity:.6;margin-right:4px;">cached ${age}</span>
-          <button id="feu-refresh" title="Refresh (Shift+click = HARD refresh, bypass browser cache)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">⟳</button>
+          <button id="sw-settings-btn" title="Discussion-reply + AI settings" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;gap:5px;">
+            ⚙ Settings
+            <span id="sw-settings-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#8b949e;"></span>
+            <span id="sw-settings-mode" style="opacity:.75;font-size:10px;">Manual</span>
+          </button>
+          <button id="feu-refresh" title="Refresh & Rescan (Shift+click = HARD refresh, bypass browser cache)" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:11px;">↻ Refresh</button>
           <button id="feu-close" title="Close" style="background:transparent;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:2px 8px;cursor:pointer;">×</button>
         </div>
       </div>

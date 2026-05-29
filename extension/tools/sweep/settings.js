@@ -82,8 +82,58 @@
     return { source: 'template', text: cfg.template };
   };
 
+  // ---------- Vendor pref bridge (Always-Active + QuizFetch toggles) ----------
+  //
+  // The dashboard runs in MAIN world without chrome.* — tools/bridge.js
+  // (ISOLATED world) handles the actual chrome.storage read/write. This
+  // wrapper turns the postMessage protocol into a Promise-based API.
+
+  const VENDOR_DEFAULTS = Object.freeze({
+    alwaysActiveEnabled: true,
+    quizFetchEnabled: true,
+  });
+
+  const pending = new Map();
+  let nextReqId = 1;
+  const listeners = new Set();
+
+  window.addEventListener('message', (ev) => {
+    if (ev.source !== window) return;
+    const m = ev.data;
+    if (!m || m.source !== 'feu-bridge') return;
+    if (m.dir === 'res' && pending.has(m.id)) {
+      const { resolve, reject } = pending.get(m.id);
+      pending.delete(m.id);
+      m.ok ? resolve(m.data) : reject(new Error(m.error || 'bridge error'));
+    } else if (m.dir === 'event' && m.op === 'prefsChanged') {
+      for (const fn of listeners) {
+        try { fn(m.data); } catch (e) { console.warn('[settings] listener threw', e); }
+      }
+    }
+  });
+
+  const request = (op, payload) => new Promise((resolve, reject) => {
+    const id = nextReqId++;
+    pending.set(id, { resolve, reject });
+    window.postMessage({ source: 'feu-bridge', dir: 'req', id, op, payload }, '*');
+    setTimeout(() => {
+      if (pending.has(id)) {
+        pending.delete(id);
+        reject(new Error('bridge timeout — is the FEU bridge content script loaded?'));
+      }
+    }, 4000);
+  });
+
+  const vendor = {
+    DEFAULTS: VENDOR_DEFAULTS,
+    getPrefs: () => request('getPrefs'),
+    setPref: (key, value) => request('setPref', { key, value }),
+    onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+  };
+
   window.FEUSweep.settings = {
     DEFAULTS, MODE_LABEL, SCOPE_LABEL, MODE_DOT_COLOR,
     get, set, reset, planFill,
+    vendor,
   };
 })();

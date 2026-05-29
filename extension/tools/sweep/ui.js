@@ -281,6 +281,13 @@
 
   const openSettings = (panel) => {
     const settingsPanel = panel.querySelector('#sw-settings-panel');
+    let vendorPrefs = { ...settings.vendor.DEFAULTS };
+    let vendorReady = false;
+
+    settings.vendor.getPrefs()
+      .then((p) => { vendorPrefs = p; vendorReady = true; })
+      .catch((e) => console.warn('[FEU] vendor prefs load failed', e));
+
     const render = () => {
       const reply = settings.get();
       const aiCfg = ai.getConfig();
@@ -348,6 +355,26 @@
         <input id="sw-ai-key" type="password" value="${aiCfg.apiKey || ''}" placeholder="${meta.keyHint}" style="${INPUT_CSS}">
         <div style="${HINT_CSS}">Stored only in this browser's localStorage. Calls go directly from your browser to the provider — never to FEU.</div>
 
+        <hr style="border:none;border-top:1px solid #30363d;margin:14px 0 10px;">
+
+        <h4 style="${SECTION_TITLE_CSS}">🧩 Bundled extensions</h4>
+        <div style="${HINT_CSS}margin-bottom:8px;">Toggle the third-party helpers that ship inside FEU Canvas Suite. Defaults: both on. Re-registers content scripts immediately.</div>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;cursor:pointer;padding:6px 0;">
+          <input id="sw-set-aa" type="checkbox" ${vendorPrefs.alwaysActiveEnabled ? 'checked' : ''} style="margin:2px 0 0;">
+          <span style="flex:1;">
+            <span style="font-weight:600;">Always-Active Window</span>
+            <span style="${HINT_CSS}display:block;">Keeps Canvas tabs visually "active" — prevents quizzes and videos from pausing when you switch tabs. Auto-on for <code style="background:#161b22;padding:1px 4px;border-radius:3px;">*.instructure.com</code> and <code style="background:#161b22;padding:1px 4px;border-radius:3px;">*.edu</code>.</span>
+          </span>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;cursor:pointer;padding:6px 0;">
+          <input id="sw-set-qf" type="checkbox" ${vendorPrefs.quizFetchEnabled ? 'checked' : ''} style="margin:2px 0 0;">
+          <span style="flex:1;">
+            <span style="font-weight:600;">Canvas Quiz Fetch</span>
+            <span style="${HINT_CSS}display:block;">Captures and organizes quiz questions on Canvas quiz pages. Adds the QuizFetch overlay when you open a quiz.</span>
+          </span>
+        </label>
+        ${vendorReady ? '' : '<div style="font-size:10.5px;color:#ffb84d;margin-top:4px;">⏳ Loading current toggle state from the extension bridge…</div>'}
+
         <div style="display:flex;gap:6px;margin-top:14px;">
           <button id="sw-set-save" style="flex:1;background:#1f6feb;color:white;border:none;border-radius:6px;padding:7px;cursor:pointer;font-size:12px;font-weight:600;">Save settings</button>
           <button id="sw-set-reset" style="background:transparent;border:1px solid #6e2222;color:#ff6b6b;border-radius:6px;padding:7px 10px;cursor:pointer;font-size:11px;">Reset reply</button>
@@ -368,6 +395,27 @@
         keyInput.placeholder = m.keyHint;
       };
       $('#sw-set-close').onclick = () => { settingsPanel.style.display = 'none'; };
+
+      const wireVendorToggle = (id, key, label) => {
+        const cb = $(id);
+        if (!cb) return;
+        cb.addEventListener('change', async () => {
+          cb.disabled = true;
+          try {
+            vendorPrefs = await settings.vendor.setPref(key, cb.checked);
+            status.textContent = `✓ ${label} ${cb.checked ? 'enabled' : 'disabled'} — content scripts re-registered. Reload Canvas tabs to apply.`;
+            status.style.color = cb.checked ? '#7ee787' : '#ffb84d';
+          } catch (e) {
+            cb.checked = !cb.checked;
+            status.textContent = `Failed to update ${label}: ${e.message}`;
+            status.style.color = '#ff6b6b';
+          } finally {
+            cb.disabled = false;
+          }
+        });
+      };
+      wireVendorToggle('#sw-set-aa', 'alwaysActiveEnabled', 'Always-Active');
+      wireVendorToggle('#sw-set-qf', 'quizFetchEnabled', 'Canvas Quiz Fetch');
 
       $('#sw-set-save').onclick = () => {
         settings.set({
@@ -412,10 +460,28 @@
       };
     };
 
-    panel.querySelector('#sw-settings-btn').onclick = () => {
-      if (settingsPanel.style.display === 'none') { render(); settingsPanel.style.display = 'block'; }
-      else settingsPanel.style.display = 'none';
+    panel.querySelector('#sw-settings-btn').onclick = async () => {
+      if (settingsPanel.style.display !== 'none') {
+        settingsPanel.style.display = 'none';
+        return;
+      }
+      // Refresh vendor prefs from chrome.storage every open so toggles
+      // always reflect what background.js actually has registered.
+      try {
+        vendorPrefs = await settings.vendor.getPrefs();
+        vendorReady = true;
+      } catch (e) {
+        console.warn('[FEU] vendor prefs fetch failed', e);
+      }
+      render();
+      settingsPanel.style.display = 'block';
     };
+
+    // Live re-render if another tab changed the toggles.
+    settings.vendor.onChange((next) => {
+      vendorPrefs = next;
+      if (settingsPanel.style.display !== 'none') render();
+    });
   };
 
   // -------- Reply panel (per-item, lazy) --------

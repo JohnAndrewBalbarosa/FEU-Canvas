@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Quiz Fetch</title>
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <!-- Settings dropdown -->
+    <div class="dropdown">
+      <div class="gear-icon">⚙️</div>
+      <div class="dropdown-menu">
+        <a href="#" id="export-data">Export Data</a>
+        <a href="#" id="import-data">Import Data</a>
+        <div class="dropdown-divider"></div>
+        <a href="https://forms.gle/f5HocGm6WbXpEq9P6" target="_blank">Send Feedback</a>
+        <a href="#" id="download-debug">Download Debug</a>
+      </div>
+    </div>
+    
+    <!-- Hidden file input for import -->
+    <input type="file" id="import-file-input" accept=".json" style="display: none;">
+
+    <div class="popup-container">
+      <!-- Header section -->
+      <div class="header-section">
+        <div class="title-section">
+          <h1>Quiz Fetch</h1>
+          <p class="subtitle">
+            A browser extension that automatically captures and organizes Canvas
+            LMS quiz questions for easy review and study.
+          </p>
+        </div>
+      </div>
+
+      <!-- Stats section -->
+      <div class="stats-section" id="stats-section">
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-number" id="stat-quizzes">-</span>
+            <span class="stat-label">Quizzes</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number" id="stat-questions">-</span>
+            <span class="stat-label">Questions</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number" id="stat-courses">-</span>
+            <span class="stat-label">Courses</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent quizzes section -->
+      <div class="history-section" id="history-section">
+        <div class="section-header">
+          <h2>Recent Quizzes</h2>
+        </div>
+        <div class="recent-quizzes-list" id="recent-quizzes-list">
+          <div class="loading-text">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Status section (shown when not on Canvas) -->
+      <div class="status-section" id="status-section">
+        <div class="status-message" id="status-message">
+          Open Quiz Fetch on a Canvas quiz page to collect data
+        </div>
+        <div class="instruction-text">
+          Navigate to a Canvas quiz and take it to automatically collect
+          questions and answers.
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>
+          Made by Wayne • <span id="version"></span>
+        </p>
+      </footer>
+    </div>
+
+    <script src="../../browser-polyfill.min.js"></script>
+    <script src="index.js"></script>
+  </body>
+</html>

@@ -1,17 +1,33 @@
 {
   "manifest_version": 3,
-  "name": "FEU Canvas Helper",
-  "version": "1.5.0",
-  "description": "Unified pending-work dashboard with built-in module sweep, configurable discussion replies (manual / template / AI / auto), and batch posting for FEU Canvas.",
-  "permissions": ["scripting", "activeTab", "storage"],
+  "name": "FEU Canvas Suite",
+  "version": "2.1.0",
+  "description": "All-in-one FEU Canvas companion: pending-work dashboard, module sweep, configurable discussion replies (manual / template / AI / auto), always-active tab override, and Canvas quiz fetcher — bundled into one package, each toggle-able from the dashboard settings.",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
   "host_permissions": [
     "https://feu.instructure.com/*",
-    "https://*.instructure.com/*"
+    "https://*.instructure.com/*",
+    "https://*.edu/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "FEU Canvas Helper — open dashboard"
-  }
+    "default_title": "FEU Canvas Suite — open dashboard"
+  },
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "*://*.instructure.com/*",
+        "*://*.edu/*"
+      ],
+      "resources": [
+        "vendor/quiz-fetch/src/content/index.js"
+      ]
+    }
+  ]
 }

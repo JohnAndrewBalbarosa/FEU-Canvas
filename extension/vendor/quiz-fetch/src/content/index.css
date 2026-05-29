@@ -1,0 +1,107 @@
+.incorrect-answer {
+   color: red !important;
+}
+
+.correct-answer {
+   color: #00db00 !important;
+}
+
+/* START STYLES FOR FILL_IN_MULTIPLE_BLANKS */
+
+.fill-in-multiple-blank-extra-info {
+  margin-top: 1em;
+}
+
+.answers-panel {
+  border: 1px solid #ccc;
+  padding: 0.75em;
+  margin-top: 0.5em;
+  background-color: #f9f9f9;
+}
+
+.answers-panel h4 {
+  margin: 0 0 0.25em;
+}
+
+.answer-list {
+  margin: 0;
+  padding-left: 0.5em;
+}
+
+
+li {
+  list-style-type: none; /* Remove default bullet */
+  padding-left: 20px; /* Add space for the icon */
+  position: relative;
+}
+
+/* Green checkmark */
+li.checkmark::before {
+  content: '✔'; /* Unicode for checkmark */
+  color: #008000;
+  font-size: 16px;
+  position: absolute;
+  left: 0; /* Position the icon on the left */
+  top: 0;
+}
+
+/* Red cross */
+li.cross::before {
+  content: '✖'; /* Unicode for cross */
+  color: red;
+  font-size: 16px;
+  position: absolute;
+  left: 0; /* Position the icon on the left */
+  top: 0;
+}
+
+/* END STYLES FOR FILL_IN_MULTIPLE_BLANKS */
+
+/* ============== QUIZ HISTORY VIEW STYLES ============== */
+
+.history-controls select:hover {
+  border-color: hsl(214.3 31.8% 86.4%);
+}
+
+.history-controls select:focus {
+  outline: none;
+  border-color: hsl(222.2 47.4% 51.2%);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.history-course-header:hover {
+  background: hsl(210 40% 96%) !important;
+}
+
+.history-quiz-item:last-child {
+  border-bottom: none !important;
+}
+
+.history-course-group:last-child {
+  margin-bottom: 0;
+}
+
+/* Scrollbar styling for history list */
+.history-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: hsl(214.3 31.8% 85%);
+  border-radius: 3px;
+}
+
+.history-list::-webkit-scrollbar-thumb:hover {
+  background: hsl(214.3 31.8% 75%);
+}
+
+/* Tab styles */
+.quizfetch-tab-container button:hover {
+  color: hsl(222.2 84% 4.9%);
+}
+
+/* ============== END QUIZ HISTORY VIEW STYLES ============== */
