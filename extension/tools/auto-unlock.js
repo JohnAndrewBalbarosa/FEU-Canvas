@@ -80,7 +80,7 @@
   const HEAVY_TYPES = new Set(['must_contribute', 'must_submit', 'min_score']);
 
   const allModules = await Promise.all(
-    courses.map(c => apiList(`/api/v1/courses/${c.id}/modules?include[]=items`).catch(() => []).then(m => ({ course: c, modules: m })))
+    courses.map(c => apiList(`/api/v1/courses/${c.id}/modules?include[]=items&include[]=content_details`).catch(() => []).then(m => ({ course: c, modules: m })))
   );
 
   const queue = []; // items to auto-complete
@@ -88,10 +88,13 @@
 
   for (const { course, modules } of allModules) {
     for (const mod of modules) {
-      if (mod.state === 'completed') continue;
+      if (mod.state === 'completed' || mod.state === 'locked') continue;
       for (const item of (mod.items || [])) {
         const req = item.completion_requirement;
         if (!req || req.completed) continue;
+
+        const cd = item.content_details || {};
+        if (cd.unlock_at && new Date(cd.unlock_at) > new Date()) continue;
 
         const record = {
           courseId: course.id,

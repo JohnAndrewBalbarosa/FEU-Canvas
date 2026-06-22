@@ -86,9 +86,10 @@
       return c;
     } catch { return null; }
   };
-  const writeCache = (courseData) => {
+  const writeCache = (courseData, moduleStateMap) => {
     try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ fetchedAt: Date.now(), courseData }));
+      const mapEntries = moduleStateMap ? [...moduleStateMap.entries()] : [];
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ fetchedAt: Date.now(), courseData, mapEntries }));
     } catch (e) { console.warn('[Dash] cache write failed', e); }
   };
   const clearCache = () => { try { localStorage.removeItem(CACHE_KEY); } catch {} };
@@ -151,6 +152,8 @@
           submissionTypes: a.submission_types || [],
           allowedExtensions: a.allowed_extensions || [],
           workflowState: a.submission?.workflow_state || 'unsubmitted',
+          itemType: a.submission_types?.includes('discussion_topic') ? 'Discussion'
+            : (a.submission_types?.includes('online_quiz') ? 'Quiz' : 'Assignment'),
         }))
         .sort((x, y) => (new Date(x.due || '9999') - new Date(y.due || '9999')));
 
@@ -158,6 +161,34 @@
         moduleStateMap.set(`${c.id}-${mod.id}`, mod.state || 'unlocked');
       }
       const blockers = engine.apiModulesToBlockers(c, modules);
+
+      // Merge unlocked heavy blockers (e.g. ungraded discussions, quizzes) that need manual action and aren't in the assignments list
+      const pendingIds = new Set(pending.map(p => p.id));
+      const pendingUrls = new Set(pending.map(p => p.url));
+      for (const b of blockers) {
+        if (!b.quick && !b.moduleLocked && !b.lockedForUser) {
+          const alreadyPending = (b.contentId && pendingIds.has(b.contentId)) || pendingUrls.has(b.url);
+          if (!alreadyPending) {
+            pending.push({
+              id: b.contentId || b.itemId,
+              name: b.title,
+              due: b.dueAt,
+              points: b.points,
+              url: b.url,
+              attempts: 0,
+              allowedAttempts: null,
+              submissionTypes: b.itemType === 'Discussion' ? ['discussion_topic'] : (b.itemType === 'Quiz' ? ['online_quiz'] : []),
+              allowedExtensions: [],
+              workflowState: 'unsubmitted',
+              itemType: b.itemType,
+              isFromBlocker: true,
+            });
+            if (b.contentId) pendingIds.add(b.contentId);
+            pendingUrls.add(b.url);
+          }
+        }
+      }
+      pending.sort((x, y) => (new Date(x.due || '9999') - new Date(y.due || '9999')));
 
       return { course: c, pending, blockers };
     }));
@@ -232,7 +263,7 @@
     const pendingHtml = pending.map(p => {
       const isOverdue = p.due && new Date(p.due) < now;
       const accent = isOverdue ? '#ff6b6b' : '#7ee787';
-      const cat = categorize({ name: p.name, itemType: 'Assignment', points: p.points });
+      const cat = categorize({ name: p.name, itemType: p.itemType || 'Assignment', points: p.points });
 
       const inProgress = p.attempts > 0 && p.workflowState !== 'submitted' && p.workflowState !== 'graded';
       const pillColor = inProgress ? '#ffb84d' : '#8b949e';
@@ -298,7 +329,7 @@
       ${pending.length ? `
         <details style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#7ee787;list-style:none;">
-            Pending Assignments <span style="opacity:.7;font-weight:400;">(${pending.length})</span>
+            Pending Assignments & Tasks <span style="opacity:.7;font-weight:400;">(${pending.length})</span>
           </summary>
           <div style="margin-top:6px;">${pendingHtml}</div>
         </details>` : ''}
@@ -463,7 +494,7 @@
       clearCache();
       root().innerHTML = `<div style="opacity:.85;">${hard ? 'HARD refreshing (bypassing all caches)…' : 'Refreshing…'}</div>`;
       const { courseData: fresh, courses: freshCourses, moduleStateMap: freshMap } = await fetchFresh({ fresh: hard });
-      writeCache(fresh);
+      writeCache(fresh, freshMap);
       renderMain(fresh, Date.now(), freshMap);
     };
 
@@ -526,18 +557,18 @@
   // ---------- bootstrap ----------
   const cached = readCache();
   if (cached && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
-    // Cached courseData doesn't include moduleStateMap — rebuild from cached
-    // blockers so rescan/run still work without a hard fetch.
-    const map = new Map();
-    for (const d of cached.courseData) {
-      for (const b of d.blockers) map.set(`${b.courseId}-${b.moduleId}`, b.moduleState || 'unlocked');
+    const map = new Map(cached.mapEntries || []);
+    if (!cached.mapEntries) {
+      for (const d of cached.courseData) {
+        for (const b of d.blockers) map.set(`${b.courseId}-${b.moduleId}`, b.moduleState || 'unlocked');
+      }
     }
     renderMain(cached.courseData, cached.fetchedAt, map);
     console.log(`%c[Dash] Loaded from cache (${fmtAge(Date.now() - cached.fetchedAt)})`, 'color:#7ee787');
   } else {
     root().innerHTML = '<div style="opacity:.85;">Loading… iterating favorited courses in parallel…</div>';
     const { courseData: fresh, moduleStateMap } = await fetchFresh();
-    writeCache(fresh);
+    writeCache(fresh, moduleStateMap);
     renderMain(fresh, Date.now(), moduleStateMap);
     console.log(`%c[Dash] Fresh fetch complete (${fresh.length} courses)`, 'color:#7ee787');
   }

@@ -100,7 +100,7 @@
           </summary>
           ${mods.map(m => {
             m.items.sort((a, b) => {
-              if (a.quick !== b.quick) return a.quick ? 1 : -1;
+              if (a.quick !== b.quick) return a.quick ? -1 : 1;
               const aDue = formatDue(a.dueAt).sortKey;
               const bDue = formatDue(b.dueAt).sortKey;
               if (aDue !== bDue) return aDue - bDue;
@@ -245,12 +245,23 @@
     walkOpenBtn.onclick = () => {
       const batch = domOpenable.slice(0, OPEN_CHUNK);
       let opened = 0;
+      const failed = [];
       for (const it of batch) {
-        if (window.open(it.href, '_blank', 'noopener')) opened++;
+        if (window.open(it.href, '_blank', 'noopener')) {
+          opened++;
+        } else {
+          failed.push(it);
+        }
       }
       walkOpenBtn.textContent = `✓ opened ${opened}`;
       walkOpenBtn.style.background = '#143d2b';
-      domOpenable = domOpenable.slice(OPEN_CHUNK);
+      domOpenable = [...failed, ...domOpenable.slice(OPEN_CHUNK)];
+      if (failed.length > 0) {
+        toast(`⚠️ Browser blocked ${failed.length} tabs. Please allow popups for Canvas.`, '#ff6b6b');
+      }
+      if (opened > 0) {
+        toast('🔄 Please reload the page to refresh Canvas.', '#79c0ff');
+      }
       if (domOpenable.length) {
         setTimeout(() => {
           walkOpenBtn.disabled = false;
@@ -629,6 +640,7 @@
           body: JSON.stringify({ message }),
         });
         if (res.ok) {
+          try { localStorage.removeItem('feuDashCache'); } catch {}
           submitBtn.textContent = '✓ Posted';
           submitBtn.style.background = '#143d2b';
           const itemDiv = document.getElementById(`sw-item-${key}`);
@@ -876,6 +888,7 @@
       btn.textContent = `✓ Posted ${ok2}${fail ? ` · ${fail} failed` : ''}`;
       btn.style.background = fail ? '#3d3414' : '#143d2b';
       toast(`Batch reply: ${ok2} posted${fail ? ` · ${fail} failed` : ''}.`, fail ? '#ffb84d' : '#7ee787');
+      try { localStorage.removeItem('feuDashCache'); } catch {}
 
       // Refresh the affected courses so unlocked items disappear.
       if (affectedCourses.size && ctx) {
@@ -956,6 +969,11 @@
 
       btn.textContent = `✓ Unlocked ${result.totalDone}`;
       btn.style.background = '#143d2b';
+
+      const onModulesPage = /\/courses\/\d+\/modules\b/.test(location.pathname) && !!document.querySelector('#context_modules');
+      if (onModulesPage && result.totalDone > 0) {
+        toast('🔄 Please reload the page to see the newly unlocked modules on this tab.', '#79c0ff');
+      }
 
       // Save sweep result for the dashboard's "recently unlocked" banner.
       try {

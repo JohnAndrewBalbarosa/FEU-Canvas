@@ -49,6 +49,7 @@
         const cd = item.content_details || {};
         const points = cd.points_possible ?? null;
         const cat = categorize({ name: item.title, itemType: item.type, type: req.type, points });
+        const isFutureLocked = cd.unlock_at && new Date(cd.unlock_at) > new Date();
         out.push({
           courseId: course.id, courseName: course.name,
           moduleId: mod.id, moduleName: mod.name, modulePosition: mod.position ?? 999,
@@ -58,7 +59,7 @@
           itemId: item.id, title: item.title, itemType: item.type,
           contentId: item.content_id ?? null,
           reqType: req.type, url: item.html_url, points, cat,
-          quick: QUICK_TYPES.has(req.type) && !moduleLocked,
+          quick: QUICK_TYPES.has(req.type) && !moduleLocked && !isFutureLocked,
           dueAt: cd.due_at || null,
           unlockAt: cd.unlock_at || null,
           lockAt: cd.lock_at || null,
@@ -168,11 +169,13 @@
     // no progress this run. Retrying them cycles forever because the
     // blocker is the same — track + skip them on later cycles.
     const blockedModules = new Set();
+    const prereqBlockedModules = new Set();
     const stopsAtHeavy = [];
     const stopsSkipped = [];
     let cycle = 0, totalWalked = 0, totalDone = 0, totalFailed = 0;
     let stopReason = null;
-    const resume = resumeCache.read();
+    resumeCache.clear();
+    const resume = {};
 
     const markItem = async (courseId, moduleId, item) => {
       const req = item.completion_requirement;
@@ -198,7 +201,7 @@
     };
 
     const walkModule = async (course, mod) => {
-      let walked = 0, marked = 0, failed = 0, stop = null, firstAttempt = true;
+      let walked = 0, marked = 0, failed = 0, stop = null;
       for (const item of (mod.items || [])) {
         const req = item.completion_requirement;
         if (req?.completed) continue;
@@ -219,14 +222,14 @@
             cat: categorize({ name: item.title, itemType: item.type, type: req?.type, points: item.content_details?.points_possible }),
             ok: true,
           });
-        } else if (firstAttempt && (r.status === 401 || r.status === 403)) {
+        } else if (r.status === 401 || r.status === 403) {
           stop = { item, reason: 'first-item-locked' };
+          attempted.delete(`${course.id}-${item.id}`);
           walked--; totalWalked--;
           break;
         } else {
           failed++; totalFailed++;
         }
-        firstAttempt = false;
         await sleep(120 + Math.random() * 120);
       }
       if (stop) {
@@ -239,9 +242,13 @@
       if (marked > 0) {
         resume[course.id] = mod.id;
         resumeCache.write(resume);
-      } else if (stop) {
-        // No progress + blocked — don't retry this module next cycle.
-        blockedModules.add(`${course.id}-${mod.id}`);
+      }
+      if (stop) {
+        if (stop.reason === 'first-item-locked') {
+          prereqBlockedModules.add(`${course.id}-${mod.id}`);
+        } else {
+          blockedModules.add(`${course.id}-${mod.id}`);
+        }
       }
       return { course, mod, walked, marked, failed, stop };
     };
@@ -258,10 +265,13 @@
           if (mod.state === 'completed') continue;
           if (mod.state === 'locked') continue;
           if (blockedModules.has(`${course.id}-${mod.id}`)) continue;
+          if (prereqBlockedModules.has(`${course.id}-${mod.id}`)) continue;
           const hasWorkable = (mod.items || []).some(it => {
             const req = it.completion_requirement;
             if (req?.completed) return false;
             if (req && HEAVY_TYPES.has(req.type)) return false;
+            const cd = it.content_details || {};
+            if (cd.unlock_at && new Date(cd.unlock_at) > new Date()) return false;
             // Skip items we've already attempted this run — if Canvas didn't
             // flip them to completed (e.g. must_view needing a real page hit,
             // or repeated 401/403/4xx), retrying them just loops forever.
@@ -284,7 +294,7 @@
       return out;
     };
 
-    const waitForStateChange = async (courseIds) => {
+    const waitForStateChange = async (courseIds, coursesWithProgress) => {
       const TICKS = 6, TICK_MS = 1000;
       let last = [];
       for (let i = 0; i < TICKS; i++) {
@@ -305,7 +315,10 @@
             const key = `${course.id}-${mod.id}`;
             const prev = moduleStateMap.get(key);
             const now = mod.state || 'unlocked';
-            if (prev === 'locked' && now !== 'locked') stateFlipped = true;
+            if (prev === 'locked' && now !== 'locked') {
+              stateFlipped = true;
+              coursesWithProgress.add(course.id);
+            }
             moduleStateMap.set(key, now);
             if (now === 'completed' || now === 'locked') continue;
             for (const item of (mod.items || [])) {
@@ -339,11 +352,15 @@
 
       let cycleMarked = 0, cycleFailed = 0, cycleStops = 0;
       const affectedCourses = new Set();
+      const coursesWithProgress = new Set();
       await Promise.all(targets.map(({ course, mod }) => moduleCap(async () => {
         affectedCourses.add(course.id);
         const r = await walkModule(course, mod);
         cycleMarked += r.marked;
         cycleFailed += r.failed;
+        if (r.marked > 0) {
+          coursesWithProgress.add(course.id);
+        }
         if (r.stop) cycleStops++;
         let stopLabel = ' ✓', lineColor = '#7ee787';
         if (r.stop) {
@@ -360,8 +377,17 @@
         setProgress(`Cycle ${cycle} · ${cycleMarked} marked · ${cycleFailed} failed · ${cycleStops} stopped at heavy`);
       })));
 
+      // Unblock modules waiting on prerequisites in courses that made progress during this cycle
+      for (const courseId of coursesWithProgress) {
+        for (const key of [...prereqBlockedModules]) {
+          if (key.startsWith(`${courseId}-`)) {
+            prereqBlockedModules.delete(key);
+          }
+        }
+      }
+
       log(`Cycle ${cycle} done: ${cycleMarked} marked across ${targets.length} module(s). Waiting for Canvas to recompute prereqs…`, '#8b949e');
-      await waitForStateChange(affectedCourses);
+      await waitForStateChange(affectedCourses, coursesWithProgress);
     }
 
     if (cycle >= MAX_CYCLES) {
