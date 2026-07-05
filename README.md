@@ -1,102 +1,69 @@
-# FEU Canvas Suite
+# FEU-Canvas
 
-An all-in-one Chrome extension companion for FEU Canvas that provides pending-work dashboards, automated module management, configurable discussion replies, and quiz utilities—all toggle-able from a unified dashboard.
+## Overview
 
-## Features
+Chrome extension companion for FEU Canvas: pending-work dashboards, discussion automation, quiz utilities
 
-- **Pending-Work Dashboard**: Visualize all pending assignments, discussions, and quizzes at a glance
-- **Canvas Quiz Fetcher**: Export and manage quiz questions
-- **Always-Active Tab Override**: Keep tabs marked as active despite inactivity
-- **Discussion Reply Automation**: Support for manual, template, AI-assisted, and auto-reply modes
-- **Configurable Settings**: Enable/disable individual features from the dashboard
-- **Unified Extension Dashboard**: Single entry point for all Canvas-related tools
+Repository: [JohnAndrewBalbarosa/FEU-Canvas](https://github.com/JohnAndrewBalbarosa/FEU-Canvas)
 
-## Architecture (UML)
+## Problem and Goal
 
-```mermaid
-graph LR
-    A["Background Service<br/>background.js"]
-    B["Content Scripts"]
-    C["Dashboard UI<br/>dashboard.js"]
-    D["Tools"]
-    E["Vendor Libraries"]
-    
-    A -->|manages| B
-    B -->|displays| C
-    C -->|controls| D
-    
-    D -->|auto-unlock| D1["auto-unlock.js"]
-    D -->|blockers| D2["blockers.js"]
-    D -->|sweep| D3["sweep/engine.js"]
-    D -->|bridge| D4["bridge.js"]
-    
-    D3 -->|uses| E1["ai-client.js"]
-    D3 -->|queries| E2["canvas-api.js"]
-    
-    E -->|quiz-fetch| E3["quiz-fetch"]
-    E -->|always-active| E4["always-active"]
-```
+This project should be read as a technical build: it identifies a concrete workflow or research problem, implements a working system around that problem, and documents enough evidence for another person to understand, run, and evaluate the result.
 
-## Tech Stack
+Primary goals:
 
-- **Platform**: Chrome Web Extension (Manifest V3)
-- **Runtime**: JavaScript (ES6+)
-- **Storage**: Chrome storage API
-- **Content Injection**: Isolated world + messaging bridge
+- Explain what the project does and who it is for.
+- Show the architecture and implementation choices.
+- Provide enough setup guidance for local review.
+- Report measured results when available.
+- Make limitations and next steps explicit instead of implying unverified impact.
 
-## Getting Started
+## System Design
 
-### Installation
+Current documented components:
 
-1. Clone or download the repository
-2. Open `chrome://extensions` in your Chrome browser
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** and select the `extension` folder
+- Project files are organized at repository root; document the main modules as the project matures.
 
-### Usage
+Project tags:
 
-1. Click the extension icon in the Chrome toolbar to open the dashboard
-2. Navigate to any Canvas course or assignment page
-3. The extension will automatically detect the context and enable relevant features
-4. Toggle individual tools on/off in dashboard settings
-5. For quiz fetching, open a quiz page and use the dedicated button
+- To be tagged based on the final project stack.
 
-### Configuration
+## Setup and Usage
 
-Each tool can be individually enabled/disabled in the dashboard:
-- Auto-unlock pending tabs
-- Block/filter specific content
-- Enable sweep automation
-- Configure discussion reply templates
+Use the commands below as the starting point for local setup. Verify environment variables, secrets, datasets, and external services before running production-like workflows.
 
-## Development
+No runnable setup command is confirmed yet.
 
-### Project Structure
+Document the dependency installation and run command after the next local verification pass.
 
-- `extension/` — Main extension directory
-  - `manifest.json` — Extension configuration
-  - `background.js` — Service worker (event handling)
-  - `dashboard.js` — Dashboard UI renderer
-  - `tools/` — Individual feature modules
-    - `sweep/` — Module automation engine
-    - `auto-unlock.js` — Tab state management
-    - `blockers.js` — Content filtering
-  - `vendor/` — Third-party libraries
+## Evaluation Method
 
-### Building for Distribution
+- Define the project task and expected behavior.
+- Run representative examples or user flows.
+- Record correctness, speed, reliability, usability, and failure cases.
 
-1. Zip the `extension` folder
-2. Upload to Chrome Web Store or distribute as CRX
+## Results
 
-## Known Limitations
+- No validated quantitative results are published yet.
+- Current README status: implementation and usage are documented before formal measurement.
 
-- Only works on FEU's Canvas instance and compatible Instructure sites
-- Some features require active user interaction for security reasons
-- AI-based replies depend on external API availability
+## Interpretation
 
-## Future Enhancements
+- The project can be described as implemented or in progress, but impact claims should stay limited until measurements are collected.
+- Use the evaluation plan below to turn the project into resume-ready, evidence-backed work.
 
-- Sync settings across browser profiles
-- Dark mode support
-- Grade prediction and analytics
-- Calendar integration
+## Limitations
+
+- Results should only be treated as validated when this README includes the dataset, sample size, metric definition, and reproduction steps.
+- Any AI-generated, OCR-based, scraped, or heuristic output requires manual review before being used as ground truth.
+- Environment-dependent measurements such as latency, memory use, browser behavior, and API reliability should be re-measured on the target machine.
+
+## Recommendations and Future Work
+
+- Add a small benchmark or validation dataset.
+- Report sample size, success rate, error rate, and runtime where applicable.
+- Add screenshots, logs, or exported reports that support the measured results.
+
+## Documentation Standard
+
+This README follows a technical-project structure: overview, goal, system design, setup, evaluation method, results, interpretation, limitations, and recommendations. Update the Results section whenever new measurements are available so project claims stay evidence-backed.
