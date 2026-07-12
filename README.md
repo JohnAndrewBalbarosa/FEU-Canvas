@@ -8,33 +8,27 @@ Repository: [JohnAndrewBalbarosa/FEU-Canvas](https://github.com/JohnAndrewBalbar
 
 ## Problem and Goal
 
-This project should be read as a technical build: it identifies a concrete workflow or research problem, implements a working system around that problem, and documents enough evidence for another person to understand, run, and evaluate the result.
+**Problem.** Canvas coursework requires repeated navigation across pending work, discussions, and quiz utilities, making status review fragmented.
 
-Primary goals:
-
-- Explain what the project does and who it is for.
-- Show the architecture and implementation choices.
-- Provide enough setup guidance for local review.
-- Report measured results when available.
-- Make limitations and next steps explicit instead of implying unverified impact.
+**Goal.** Provide a browser-extension companion that summarizes pending work and offers bounded utilities inside the user’s own FEU Canvas session.
 
 ## System Design
 
-Current documented components:
-
-- Project files are organized at repository root; document the main modules as the project matures.
-
-Project tags:
-
-- To be tagged based on the final project stack.
+- `extension/manifest.json`: browser-extension permissions and entry points.
+- `canvas-dashboard.js`: pending-work dashboard behavior.
+- `canvas-blockers.js`: page-level guards and supported Canvas interactions.
+- No package-managed build step is present; the extension runs from committed browser assets.
 
 ## Setup and Usage
 
-Use the commands below as the starting point for local setup. Verify environment variables, secrets, datasets, and external services before running production-like workflows.
-
-No runnable setup command is confirmed yet.
-
-Document the dependency installation and run command after the next local verification pass.
+```bash
+# Chrome/Edge
+# 1. Open the browser extensions page
+# 2. Enable Developer mode
+# 3. Choose Load unpacked
+# 4. Select the extension/ directory
+# 5. Open FEU Canvas in the same browser profile
+```
 
 ## Evaluation Method
 
